@@ -8,37 +8,37 @@ image_builds:
 - name: config
   image: vibesys-config-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-config-service
 - name: station
   image: vibesys-station-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-station-service
 - name: train
   image: vibesys-train-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-train-service
 - name: travel
   image: vibesys-travel-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-travel-service
 - name: route
   image: vibesys-route-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-route-service
 - name: price
   image: vibesys-price-${NAMESPACE}:latest
   context: .
-  dockerfile: ${CONFIG_DIR}/Dockerfile
+  dockerfile: ${CONFIG_DIR}/service.Dockerfile
   build_args:
     MODULE: ts-price-service
 image_overrides:
