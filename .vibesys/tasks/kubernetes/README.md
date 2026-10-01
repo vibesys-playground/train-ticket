@@ -3,8 +3,11 @@
 This package deploys the six Train Ticket services exercised by the
 ServiceBench workload, plus their MongoDB dependencies.
 Every evaluation builds the six Java modules from the assembled candidate
-checkout. The trusted multi-stage Dockerfile runs Maven inside the build and
+checkout. The trusted multi-stage `service.Dockerfile` runs Maven inside the build and
 does not consume pre-existing `target` artifacts.
+It is not named `Dockerfile` because VibeSys treats a task-level `Dockerfile`
+as the run-environment image, which cannot be combined with
+`--run-environment local`.
 Its Maven layer packages all six modules before the module-specific build
 argument is declared, so Docker reuses one reactor build for the six runtime
 images.
