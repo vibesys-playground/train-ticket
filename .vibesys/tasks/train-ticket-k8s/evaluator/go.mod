@@ -3,8 +3,8 @@ module vibesys/train-ticket-k8s-evaluator
 go 1.25.0
 
 // The vibesys-evaluator Go SDK (go/workload for the generators, go/check for the oracle) of the
-// release whose microservices image the task image is built FROM (the Dockerfile;
-// tests/test_pins.py checks they agree).
+// release whose PyPI package the task image installs (the Dockerfile's
+// VIBESYS_EVALUATOR_VERSION; tests/test_pins.py checks they agree).
 require (
 	github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.3.0-rc.2
 	google.golang.org/protobuf v1.36.12
