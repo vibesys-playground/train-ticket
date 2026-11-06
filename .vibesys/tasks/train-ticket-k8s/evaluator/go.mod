@@ -13,5 +13,7 @@ require (
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.9-20250912141014-52f32327d4b0.1 // indirect
+	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/anishathalye/porcupine v1.3.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -1,6 +1,7 @@
 package ttapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,12 +32,25 @@ type Info struct {
 	B      string          `json:"b,omitempty"`
 }
 
-// OpName is the operation name the workload gives loadgen: "station.create", "route.query.routeBetween".
+// OpName is the operation name the workload gives loadgen ([a-z][a-z0-9_]*): "station_create",
+// "route_query_route_between".
 func (i Info) OpName() string {
 	if i.Op == "query" {
-		return i.Table + ".query." + i.Q
+		return i.Table + "_query_" + snake(i.Q)
 	}
-	return i.Table + "." + i.Op
+	return i.Table + "_" + i.Op
+}
+
+func snake(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteByte('_')
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 var Tables = []string{"config", "station", "train", "route", "price", "travel"}
@@ -80,13 +94,54 @@ func IsFind1(q string) bool { return q == "stationId" || q == "priceBy" }
 func IsSet(q string) bool   { return q == "routeBetween" || q == "tripsByRoute" }
 func IsJoin(q string) bool  { return q == "tripRoute" || q == "tripTrain" }
 
+// bodyOf decodes an entity for a request body with its numbers as they are written: an integer
+// stays an int64 (a float64 would go out as 1600000000000.0, which Jackson refuses for a Date or
+// an int), anything else is a float64.
+func bodyOf(entity json.RawMessage) (map[string]any, error) {
+	d := json.NewDecoder(bytes.NewReader(entity))
+	d.UseNumber()
+	var m map[string]any
+	if err := d.Decode(&m); err != nil {
+		return nil, err
+	}
+	var walk func(v any) (any, error)
+	walk = func(v any) (any, error) {
+		switch v := v.(type) {
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return n, nil
+			}
+			return v.Float64()
+		case map[string]any:
+			for k, e := range v {
+				w, err := walk(e)
+				if err != nil {
+					return nil, err
+				}
+				v[k] = w
+			}
+		case []any:
+			for k, e := range v {
+				w, err := walk(e)
+				if err != nil {
+					return nil, err
+				}
+				v[k] = w
+			}
+		}
+		return v, nil
+	}
+	_, err := walk(m)
+	return m, err
+}
+
 // Request maps an operation to the HTTP request of the real API.
 func Request(i Info) (method, path string, body any, err error) {
 	esc := url.PathEscape
 	p := prefix[i.Table] + coll[i.Table]
 	var m map[string]any
 	if len(i.Entity) > 0 {
-		if err := json.Unmarshal(i.Entity, &m); err != nil {
+		if m, err = bodyOf(i.Entity); err != nil {
 			return "", "", nil, err
 		}
 		if i.Table == "travel" { // TravelInfo.tripId is the string "G1234"; the stored Trip has {type,number}
@@ -109,7 +164,7 @@ func Request(i Info) (method, path string, body any, err error) {
 				sl = append(sl, s.(string))
 			}
 			for _, d := range m["distances"].([]any) {
-				dl = append(dl, fmt.Sprint(int64(d.(float64))))
+				dl = append(dl, fmt.Sprint(d))
 			}
 			return http.MethodPost, p, map[string]any{"id": m["id"], "startStation": m["startStationId"], "endStation": m["terminalStationId"],
 				"stationList": strings.Join(sl, ","), "distanceList": strings.Join(dl, ",")}, nil

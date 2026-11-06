@@ -247,3 +247,83 @@ func TestDanglingJoin(t *testing.T) {
 		t.Fatalf("a deleted route returned by the join: %s", r.Verdict)
 	}
 }
+
+// Two overlapping deletes of one entity both find it and both answer "deleted" (find-then-delete);
+// one after the other, the second must have found nothing.
+func TestRacyDelete(t *testing.T) {
+	st := ttfake.Station("beijing", "Bei", 3) // a seeded station
+	del := ttapi.Info{Table: "station", Op: "delete", Key: "beijing", Entity: json.RawMessage(st)}
+	deleted := `{"status":1,"msg":"m","data":null}`
+	over := check.NewHistory([][]check.Call{{call(del, 0, 100, 200, deleted), call(del, 50, 150, 200, deleted)}}, nil)
+	if r := run(t, over, false); r.Verdict != check.Pass {
+		t.Fatalf("overlapping deletes: %s\n%s", r.Verdict, r.Text(3))
+	}
+	seq := check.NewHistory([][]check.Call{{call(del, 0, 100, 200, deleted), call(del, 200, 300, 200, deleted)}}, nil)
+	if r := run(t, seq, false); r.Verdict != check.Fail {
+		t.Fatalf("sequential deletes: %s", r.Verdict)
+	}
+}
+
+// An update that found the entity before an overlapping delete removed it saves it back
+// (find-then-save): a later read sees the update's value. Without the overlap it is a bug.
+func TestUpdateAfterRacyDeleteSavesItBack(t *testing.T) {
+	tr := ttfake.Train("TeKuai", 7, 8, 99) // a seeded train type
+	ok := `{"status":1,"msg":"m","data":null}`
+	upd := ttapi.Info{Table: "train", Op: "update", Entity: json.RawMessage(tr)}
+	del := ttapi.Info{Table: "train", Op: "delete", Key: "TeKuai"}
+	get := ttapi.Info{Table: "train", Op: "get", Key: "TeKuai"}
+	body := `{"status":1,"msg":"m","data":` + tr + `}`
+	mk := func(updStart int64) *check.History {
+		return check.NewHistory([][]check.Call{{
+			call(del, 0, 100, 200, ok),
+			call(upd, updStart, updStart+100, 200, ok),
+			call(get, 300, 310, 200, body),
+		}}, nil)
+	}
+	if r := run(t, mk(50), false); r.Verdict != check.Pass {
+		t.Fatalf("an update overlapping a delete saved the train back: %s\n%s", r.Verdict, r.Text(3))
+	}
+	if r := run(t, mk(150), false); r.Verdict != check.Fail {
+		t.Fatalf("an update after the delete answered 1 and the train is back: %s", r.Verdict)
+	}
+}
+
+// Lost reads count toward the lost share (a piece without keys): at the accuracy load they are the
+// candidate's fault too.
+func TestLostReadsCount(t *testing.T) {
+	get := ttapi.Info{Table: "train", Op: "get", Key: "TeKuai"}
+	var calls []check.Call
+	for i := int64(0); i < 10; i++ {
+		c := call(get, i*100, i*100+10, 200, `{"status":1,"msg":"m","data":`+ttfake.Train("TeKuai", 2147483647, 2147483647, 120)+`}`)
+		if i < 3 {
+			c.Steps[0].Status, c.Steps[0].Body = 0, nil
+		}
+		calls = append(calls, c)
+	}
+	r := run(t, check.NewHistory([][]check.Call{calls}, nil), false)
+	if r.Verdict != check.Fail || !r.Specs[0].LostShareExceeded {
+		t.Fatalf("3 of 10 reads lost: %s\n%s", r.Verdict, r.Text(3))
+	}
+}
+
+// A restart re-seeds only the restarted service's table; a fault on another Deployment changes
+// nothing.
+func TestRestartTargetsItsTable(t *testing.T) {
+	ok := `{"status":1,"msg":"m","data":null}`
+	seeded := ttfake.Train("TeKuai", 2147483647, 2147483647, 120)
+	del := ttapi.Info{Table: "train", Op: "delete", Key: "TeKuai"}
+	get := ttapi.Info{Table: "train", Op: "get", Key: "TeKuai"}
+	back := `{"status":1,"msg":"m","data":` + seeded + `}`
+	mk := func(target string) *check.History {
+		return check.NewHistory([][]check.Call{
+			{call(del, 0, 10, 200, ok)},
+			{call(get, 100, 110, 200, back)},
+		}, []check.Fault{{Kind: "restart", Target: target, Start: 20, End: 90, AfterPhase: 0}})
+	}
+	if r := run(t, mk("ts-train-service"), true); r.Verdict != check.Pass {
+		t.Fatalf("restarting the train service brings the seeded train back: %s\n%s", r.Verdict, r.Text(3))
+	}
+	if r := run(t, mk("ts-route-service"), true); r.Verdict != check.Fail {
+		t.Fatalf("restarting the route service brought a train back: %s", r.Verdict)
+	}
+}

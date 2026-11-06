@@ -1,21 +1,21 @@
-// Command oracle is train-ticket-k8s's accuracy oracle: it checks a captured history of the
-// task's accuracy workload against Train Ticket's semantics (internal/ttoracle), on the
-// vibesys-evaluator checker (go/check).
+// Command oracle (tt-oracle in the task image) is train-ticket-k8s's accuracy oracle: it checks a
+// captured history of the accuracy workload (internal/ttaccuracy) against Train Ticket's
+// semantics (internal/ttoracle), on vibesys-evaluator's checker (go/check).
 //
-// The task's [accuracy] command will run it on the history the accuracy capture wrote:
+// accuracy.py's accuracy check runs it on the history the accuracy run wrote:
 //
-//	oracle --history DIR [--out /vibesys/artifacts/accuracy]
+//	tt-oracle --history DIR --out DIR
 //
-// and it exits 0 (PASS), 1 (FAIL) or 2 (UNKNOWN). The history's dataset file is dataset.json:
-// {"initial": {table: [entity...]}, "reinit": {table: [entity...]}} (see ttoracle.Dataset).
+// and it exits 0 (PASS), 1 (FAIL) or 2 (UNKNOWN). The history's dataset file is the task's
+// (dataset.py: the fixture's seed, size and digest): the oracle's initial state is the services'
+// startup catalog (internal/ttcatalog) and that fixture, and a restart re-applies the catalog.
+// `tt-oracle import ...` makes a history directory of older phase directories (check.Main).
 package main
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 
+	"vibesys/train-ticket-k8s-evaluator/internal/ttdata"
 	"vibesys/train-ticket-k8s-evaluator/internal/ttoracle"
 
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
@@ -26,13 +26,13 @@ func main() {
 		if h.Dataset == "" {
 			return nil, errors.New("the history has no dataset file")
 		}
-		raw, err := os.ReadFile(h.Dataset)
+		data, err := ttdata.Load(h.Dataset)
 		if err != nil {
 			return nil, err
 		}
-		d := &ttoracle.Dataset{}
-		if err := json.Unmarshal(raw, d); err != nil {
-			return nil, fmt.Errorf("%s: %w", h.Dataset, err)
+		d, err := ttoracle.ForFixture(data)
+		if err != nil {
+			return nil, err
 		}
 		spec, err := ttoracle.Spec(d)
 		if err != nil {

@@ -7,8 +7,11 @@
 //
 //   - A restart re-applies the service's seed data (InitData): create-if-absent for config,
 //     station, train and trip, an upsert (overwrite) for route and price.
-//   - config/station/train create is find-then-save, so two overlapping creates of one id can
-//     both answer "created"; the later save wins.
+//   - Every create, update and delete is find-then-act (two Mongo calls), so overlapping writes
+//     of one key can answer what no atomic order explains: two overlapping creates both answer
+//     "created" (the later save wins), two overlapping deletes both answer "deleted", and an
+//     update that found the entity before an overlapping delete removed it saves it back. The
+//     model allows exactly these, and only while the other write overlaps.
 //   - Route and price POST are upserts, and the server generates the id when the request's is
 //     missing or shorter than 10 characters.
 //   - Route DELETE removes, then re-reads: it answers status 0 if a concurrent upsert brought the
@@ -59,11 +62,15 @@ type Out struct {
 	Empty   bool   // join: the route is gone (empty route)
 }
 
-type rec struct{ Call, Ret int64 }
+// rec is a create or delete that took effect, with its window.
+type rec struct {
+	Call, Ret int64
+	Delete    bool
+}
 
 // State is one entity's state (its key is the partition's: Op.Keys[0], Init's and Fault's
-// keys[0]). Recent remembers the creates that took effect lately, for the racy-create rule; it is
-// pruned at Op.Floor.
+// keys[0]). Recent remembers the creates and deletes that took effect lately, for the racy-write
+// rules; it is pruned at Op.Floor.
 type State struct {
 	Ent    string // canonical entity; "" = absent
 	Recent []rec
@@ -71,14 +78,17 @@ type State struct {
 
 func (s State) with(ent string) State { s.Ent = ent; return s }
 
-func (s State) created(call, ret, floor int64) State {
+func (s State) created(call, ret, floor int64) State { return s.remember(rec{call, ret, false}, floor) }
+func (s State) deleted(call, ret, floor int64) State { return s.remember(rec{call, ret, true}, floor) }
+
+func (s State) remember(r rec, floor int64) State {
 	keep := make([]rec, 0, len(s.Recent)+1)
-	for _, r := range s.Recent {
-		if r.Ret >= floor {
-			keep = append(keep, r)
+	for _, old := range s.Recent {
+		if old.Ret >= floor {
+			keep = append(keep, old)
 		}
 	}
-	s.Recent = append(keep, rec{call, ret})
+	s.Recent = append(keep, r)
 	return s
 }
 
@@ -96,9 +106,10 @@ func (s State) pruned(floor int64) State {
 	return s
 }
 
-func (s State) overlapsCreate(call, ret int64) bool {
+// overlaps says whether a create (or, with del, a delete) that took effect overlaps [call, ret].
+func (s State) overlaps(del bool, call, ret int64) bool {
 	for _, r := range s.Recent {
-		if r.Call < ret && call < r.Ret {
+		if r.Delete == del && r.Call < ret && call < r.Ret {
 			return true
 		}
 	}
@@ -128,6 +139,9 @@ func hash(s State) uint64 {
 	for _, r := range s.Recent {
 		h = (h ^ uint64(r.Call)) * 1099511628211
 		h = (h ^ uint64(r.Ret)) * 1099511628211
+		if r.Delete {
+			h = (h ^ 1) * 1099511628211
+		}
 	}
 	return h
 }
@@ -297,7 +311,7 @@ func write(s State, in In, op check.Op[In, Out]) (State, bool) {
 		if s.Ent == "" {
 			return s, false
 		}
-		return s.with(""), true
+		return s.with("").deleted(op.Call, op.Return, op.Floor), true
 	}
 	return s, false
 }
@@ -340,16 +354,31 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 			switch in.Kind {
 			case kCreate:
 				want = cf.dup
-				// find-then-save: an overlapping create may also have found the id absent
-				if out.Status == 1 && cf.dup == 0 && s.overlapsCreate(op.Call, op.Return) {
+				// find-then-save: an overlapping create may also have found the id absent, and
+				// the two saves land in either order (a trip create answers 1 either way)
+				if out.Status == 1 && s.overlaps(false, op.Call, op.Return) {
 					a := s.created(op.Call, op.Return, op.Floor)
-					b := a.with(in.E)
-					return []State{a, b}, ""
+					return []State{a, a.with(in.E)}, ""
 				}
 			case kUpdate:
 				want = cf.updMiss
+				// find-then-save: an update that found the entity before an overlapping delete
+				// removed it saves it back (a trip update also answers 1 to a missing trip, and
+				// then changes nothing)
+				if out.Status == 1 && s.overlaps(true, op.Call, op.Return) {
+					back := s.with(in.E)
+					if cf.updMiss == 1 {
+						return []State{s, back}, ""
+					}
+					return []State{back}, ""
+				}
 			case kDelete:
 				want = cf.delMiss
+				// find-then-delete: a delete that found the entity before an overlapping delete
+				// removed it answers "deleted" as well
+				if out.Status == 1 && cf.delMiss == 0 && s.overlaps(true, op.Call, op.Return) {
+					return []State{s}, ""
+				}
 			}
 		}
 		if in.Kind == kDelete && in.Table == "route" {

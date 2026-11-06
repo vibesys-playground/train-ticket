@@ -1,4 +1,4 @@
-"""bench.py and check.py build their objects, and the manifest is one the package deploys.
+"""bench.py and accuracy.py build their objects, and the manifest is one the package deploys.
 
 Run with vibesys-evaluator installed at the task's pin (README.md, "Tests"):
 
@@ -32,12 +32,17 @@ SERVICES = [f"ts-{name}-service" for name in bench.SERVICES]
 
 
 def rendered() -> list[dict]:
-    # The package's own renderer (private, pinned): what the deploy applies.
-    from vibesys_evaluator.microservices._k8s import render
-
-    text = (TASK / bench.SYSTEM.manifest).read_text()
-    images = {variable: f"registry/vse/image:{variable.lower()}" for variable in bench.SYSTEM.images}
-    return list(render(text, namespace="vse-test", images=images, data_tier={}).objects)
+    # The manifest as the deploy renders it: its variables substituted, every object in the
+    # sample's namespace. (The renderer itself is the SDK's Go k8s.Render, which
+    # evaluator/manifest/manifest_test.go runs on this manifest.)
+    text = (TASK / bench.SYSTEM.manifest).read_text().replace("${NAMESPACE}", "vse-test")
+    for variable in bench.SYSTEM.images:
+        text = text.replace("${" + variable + "}", f"registry/vse/image:{variable.lower()}")
+    assert "${" not in "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    objects = [o for o in yaml.safe_load_all(text) if o]
+    for o in objects:
+        o["metadata"]["namespace"] = "vse-test"
+    return objects
 
 
 def test_the_system_is_a_k8s_app_of_the_candidates_one_image():
@@ -147,15 +152,28 @@ def test_seed_runs_the_go_seed_and_checks_its_digest(monkeypatch):
         bench.seed(wrong)
 
 
-def test_check_deploys_the_same_system_with_the_suite_as_its_seed():
-    check = importlib.import_module("check")
-    assert check.SYSTEM.seed is check.accuracy
-    assert dataclasses.replace(check.SYSTEM, seed=bench.seed) == bench.SYSTEM
-    assert check.WORKLOAD_TOML.is_file()
-    workload = tomllib.loads(check.WORKLOAD_TOML.read_text())
-    assert {t["name"] for t in workload["targets"]} == set(bench.SERVICES)
-    assert {t["address"] for t in workload["targets"]} == {bench.GATEWAY}
-    assert check.suite_command()[:3] == ["servicebench", "--mode", "accuracy"]
+def test_the_accuracy_check_runs_its_workload_and_oracle_at_a_fixed_low_load():
+    accuracy = importlib.import_module("accuracy")
+    assert isinstance(accuracy.WORKLOAD, ms.Generator)
+    assert list(accuracy.WORKLOAD.command) == ["tt-accuracy"]
+    check = accuracy.ACCURACY
+    assert isinstance(check, ms.Accuracy)
+    assert list(check.oracle) == ["tt-oracle"]
+    assert (check.phases, check.rate, check.secs, check.warmup) == (4, 40, 60, 5)
+    # every service restarted once, between phases, each a Deployment the App lets it restart
+    assert sorted(f.deployment for f in check.faults) == sorted(SERVICES)
+    assert all(f.action == "restart" and 0 <= f.after < check.phases - 1 for f in check.faults)
+    assert set(f.deployment for f in check.faults) <= set(bench.SYSTEM.restartable)
+    with pytest.raises(RuntimeError, match="bench.py is the benchmark"):
+        accuracy.no_benchmark(None)
+
+
+def test_the_oracle_models_the_faults_the_check_runs():
+    # the oracle maps a restart's Deployment to its table (ttoracle.ServiceTable): ts-<table>-service
+    accuracy = importlib.import_module("accuracy")
+    tables = {"config", "station", "train", "route", "price", "travel"}
+    for fault in accuracy.ACCURACY.faults:
+        assert re.fullmatch(r"ts-(\w+)-service", fault.deployment).group(1) in tables
 
 
 def test_the_task_manifest_is_schema_0_2_without_a_candidate_server():
@@ -165,7 +183,9 @@ def test_the_task_manifest_is_schema_0_2_without_a_candidate_server():
     assert manifest["environment"]["needs"] == ["kubernetes"]
     assert manifest["benchmark"]["command"][:3] == ["python", "/task/bench.py", "benchmark"]
     assert manifest["benchmark"]["result_protocol"] == 2
-    assert manifest["accuracy"]["command"][:3] == ["python", "/task/check.py", "accuracy"]
+    assert manifest["accuracy"]["command"] == [
+        "python", "/task/accuracy.py", "accuracy", "--project-root", "${PROJECT_ROOT}"
+    ]
     objectives = tomllib.loads((TASK / "objectives.toml").read_text())
     assert [o["name"] for o in objectives["objective"]] == list(bench.METRICS)
     for objective in objectives["objective"]:

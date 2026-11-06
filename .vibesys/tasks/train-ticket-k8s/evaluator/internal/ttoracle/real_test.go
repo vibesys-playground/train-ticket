@@ -101,7 +101,7 @@ func TestRealCaptureTampered(t *testing.T) {
 		}
 		for j := range calls {
 			c := &calls[j]
-			if tampered == 0 && c.Op == "price.list" && len(c.Steps[0].Body) > 0 {
+			if tampered == 0 && c.Op == "price_list" && len(c.Steps[0].Body) > 0 {
 				c.Steps[0].Body = []byte(strings.Replace(string(c.Steps[0].Body), `"basicPriceRate"`, `"basicPriceRat"`, 1))
 				tampered++
 			}

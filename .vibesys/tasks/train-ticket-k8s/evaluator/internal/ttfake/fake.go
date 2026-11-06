@@ -53,6 +53,7 @@ type Fake struct {
 	Bugs       Bugs
 	Delay      time.Duration
 	Reinit     bool
+	ReinitSeed map[string]string // what a restart re-applies (InitData's catalog); the seed when nil
 	EmptyRoute bool
 	seed       map[string]string
 	nrestart   int
@@ -81,22 +82,35 @@ func New(seed map[string]string, b Bugs) *Fake {
 // Restart restarts the service of one table (round robin). With Reinit the service's startup
 // code re-applies the seed like Train Ticket's InitData: create-if-absent, upsert for route/price.
 func (f *Fake) Restart() (kind, target string) {
-	f.restart()
 	if !f.Reinit {
+		f.restart()
 		return "restart", ""
 	}
 	t := ttapi.Tables[f.nrestart%len(ttapi.Tables)]
 	f.nrestart++
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for k, e := range f.seed {
-		tt, id, _ := strings.Cut(k, "/")
-		if tt != t {
-			continue
+	return f.RestartService(t)
+}
+
+// RestartService restarts the service of table t: caches reload from durable storage and, with
+// Reinit, its startup code re-applies its part of the seed (ReinitSeed when set).
+func (f *Fake) RestartService(t string) (kind, target string) {
+	f.restart()
+	if f.Reinit {
+		seed := f.seed
+		if f.ReinitSeed != nil {
+			seed = f.ReinitSeed
 		}
-		if _, ex := f.cache[t][id]; !ex || t == "route" || t == "price" {
-			f.put(t, id, e)
+		f.mu.Lock()
+		for k, e := range seed {
+			tt, id, _ := strings.Cut(k, "/")
+			if tt != t {
+				continue
+			}
+			if _, ex := f.cache[t][id]; !ex || t == "route" || t == "price" {
+				f.put(t, id, e)
+			}
 		}
+		f.mu.Unlock()
 	}
 	return "restart", "ts-" + t + "-service" // the service's Deployment, as the accuracy run names it
 }
