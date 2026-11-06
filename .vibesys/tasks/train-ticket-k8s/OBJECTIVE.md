@@ -53,7 +53,7 @@ The task owns everything else, and a candidate cannot change it:
   `ts-gateway:8080`) that routes `/api/v1/<name>service` to `ts-<name>-service`; replica
   counts, resources, commands;
 - the fixture, the load generator, the workloads, the open loop's offered rate, and the
-  checks.
+  accuracy check.
 
 Resources are fixed (requests = limits). Every service pod gets 2 CPUs and 1 GiB; every
 MongoDB 1 CPU and 1 GiB; the gateway 2 CPUs. You cannot add replicas or CPU; a gain must come
@@ -77,8 +77,8 @@ creates its fixture through the API.
 
 ## Correctness bar
 
-The benchmark checks the responses of its own operations, all writes and 10% of reads,
-against a model of the fixture and every update the sample sent:
+The responses must meet this bar against a model of the fixture and every update sent. The
+benchmark only measures; the accuracy check judges the bar:
 
 1. Exact contract: every response is the services' envelope `{status, msg, data}` with
    exactly those fields; an entity has exactly its service's fields with their types
@@ -92,9 +92,9 @@ against a model of the fixture and every update the sample sent:
    direction, a price's route), a lookup by the retired key finds nothing (application
    status 0), and a lookup by the new key finds the entity.
 
-A failed check or a request error in a measurement window fails the sample, as does an
-operation of the mix that never completed or an open loop that cannot offer 95% of its
-rate.
+In the benchmark, a request error (a response other than the step's expected HTTP status, or
+none) in a measurement window fails the sample, as does an operation of the mix that never
+completed or an open loop that cannot offer 95% of its rate.
 
 The task's `[accuracy]` check is interim (README.md): it runs servicebench's Train Ticket
 accuracy suite against the deployed candidate (startup catalog, schemas, a randomized

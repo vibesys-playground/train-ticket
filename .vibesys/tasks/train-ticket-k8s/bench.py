@@ -5,9 +5,10 @@
 The five parts: (1) the system under test, (2) the initial data (seed),
 (3) the workload, (4) the benchmark function, (5) the validity rules. The
 data is dataset.py's fixture, created through the public API by the Go seed
-(evaluator/cmd/seed). The workload (operations, request distributions, the
-model the updates change and the checks of the responses) is the Go generator
-of evaluator/cmd/generator; this script only orchestrates.
+(evaluator/cmd/seed). The workload (operations, request distributions and the
+model the updates change) is the Go generator of evaluator/cmd/generator; this
+script only orchestrates. The benchmark only measures: whether the responses
+are right is the accuracy check's to judge.
 """
 
 from __future__ import annotations
@@ -103,10 +104,10 @@ SYSTEM = k8s.App(
 # ------------------------------------------------------------ (3) workload
 # The operations (35% lists, 25% point and secondary-index reads, 35% updates each followed
 # by a read-your-write read and, where a secondary key moved, a read by the retired key),
-# how each request is drawn, the model the updates change and the checks are Go:
+# how each request is drawn and the model the updates change are Go:
 # evaluator/internal/ttworkload on the vibesys-evaluator Go SDK. The task image builds it as
 # tt-generator (evaluator/cmd/generator); each phase pod runs it under loadgen to generate
-# the request stream, then to check the phase's responses.
+# the request stream.
 
 WORKLOAD = ms.Generator(["tt-generator"])  # on the task image's PATH
 
@@ -130,8 +131,8 @@ def benchmark(run: ms.Run) -> None:
     Three closed-loop trials (128 clients, 30 s after a warmup of 180 s for the
     first and 10 s for the others): the throughput is their median. Three
     open-loop trials (10 s warmup, 30 s, evenly spaced arrivals) at 0.7 x that
-    throughput: the p99 is their median. The sample's updates carry from phase
-    to phase, so nothing is reset.
+    throughput: the p99 is their median. The application keeps the sample's
+    updates from phase to phase; nothing is reset.
     """
     closed = [
         run.closed_loop(clients=CLIENTS, secs=CLOSED_SECS, warmup=FIRST_WARMUP if trial == 0 else CLOSED_WARMUP).ops_per_sec
@@ -154,8 +155,8 @@ METRICS = {
     "operations_per_second": vse.Metric(unit="ops/s", direction="max"),
     "latency_ms.p99": vse.Metric(unit="ms", direction="min"),
 }
-# No error and no failed check in any window, every operation of the mix completed,
-# and the open loop offers at least 95% of its rate.
+# No load generator error in any window, every operation of the mix completed, and the
+# open loop offers at least 95% of its rate.
 VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
 
 

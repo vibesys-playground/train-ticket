@@ -10,11 +10,12 @@ correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives; the noise values are placeholders until a base is measured. |
-| `Dockerfile` | The task image: vibesys-evaluator (the Python package from PyPI, loadgen and otelcapture by `go install`) at the release `VIBESYS_EVALUATOR_VERSION` (v0.2.0-rc.1), kubectl, buildctl, the task's Go programs, and the interim check's servicebench. |
+| `Dockerfile` | The task image: vibesys-evaluator from `sdk/vibesys-evaluator` (its Python package; loadgen, otelcapture and the core's `vibesys-evaluator` built from its Go module), kubectl, buildctl, the task's Go programs, and the interim check's servicebench. |
+| `sdk/vibesys-evaluator` | A copy of vibesys-evaluator's phase-runner branch (Go module and Python package, without tests) until it is released; then the Dockerfile pins the release (its wheel bundles the binaries) and `evaluator/go.mod` drops the `replace`. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules. |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
-| `evaluator/` | The Go module: `internal/ttdata` (fixture, entities, paths, admin JWT), `internal/ttworkload` (operations, model, checks, on `loadgen/workload`), `cmd/generator` (`tt-generator`), `cmd/seed` (`tt-seed`). |
+| `evaluator/` | The Go module: `internal/ttdata` (fixture, entities, paths, admin JWT), `internal/ttworkload` (operations and model, on the Go SDK's `workload`), `cmd/generator` (`tt-generator`), `cmd/seed` (`tt-seed`). |
 | `check.py`, `accuracy/workload.toml` | The interim `[accuracy]` check (below). |
 | `tests/` | Python tests of bench.py, check.py, the manifest and the pins. |
 
@@ -28,35 +29,34 @@ Maven reactor as context) and the task image, creates a fresh namespace, applies
 its collection through the gateway, then runs the seed Job: `tt-seed` creates the fixture
 (32 records of 7 connected entities) through the public API and reads every entity back.
 `benchmark(run)` then runs six phases, each a pod of the task image in the namespace where
-loadgen reads `tt-generator generate`'s request stream and `tt-generator check` checks the
-responses afterwards:
+loadgen reads `tt-generator generate`'s request stream:
 
 1. three closed loops, 128 clients, 30 s windows (the first after a 180 s warmup that warms
    the JVMs, the others after 10 s): `operations_per_second` is the median;
 2. three open loops at 0.7 x that, uniform arrivals, 30 s windows after 10 s warmups:
    `latency_ms.p99` is the median.
 
-Updates carry from phase to phase (the history); nothing is reset. The namespace is
-deleted on every exit path.
+The application keeps the updates from phase to phase; nothing is reset, and each phase's
+generator starts from the fixture. The namespace is deleted on every exit path.
 
 ## The workload
 
 `internal/ttworkload` ports the servicebench Train Ticket benchmark adapter (vibesys
 `resources/evaluators/microservice/apps/trainticket` and `appsupport/trainticket`, deleted
 with servicebench): the same fixture grammar (`fuzz.go`, now on the evaluator's `Rand`, so
-the fixture is a function of `dataset.py`'s seed), the same operations and weights, the same
-update grammar, and the same response validation (`validation.go`: the strict envelope, exact
-field sets and types of list elements, unique keys, exact values, negative reads of retired
-secondary keys). Two things changed with the framework:
+the fixture is a function of `dataset.py`'s seed), the same operations and weights and the
+same update grammar. The benchmark only measures: servicebench's response validation
+(`validation.go`) is the accuracy check's (each request's info names its record and, for an
+update, the value written and the retired key). Things that changed with the framework:
 
 - servicebench held a lock per fixture record, so a read never overlapped an update of its
-  record and saw exactly the last value. Here an update holds its entity's exclusive key
-  (updates of one entity never overlap and run in stream order) and reads run freely; a read
-  is checked against the values the visibility rule allows (`workload.Versions` with bound 0:
-  an update acknowledged before the read started must be visible; one concurrent with it may
-  be). Writes are always checked; reads are checked on the SDK's default 10% sample.
-- `create_read_delete_config` (weight 5 of 100) is not in the mix: it needs an HTTP DELETE,
-  which neither SDK front end can send yet (below). The mix is 35/25/35 out of 95.
+  record. Here requests run freely, updates of one entity included.
+- Each phase's generator starts from the fixture, while the application keeps the earlier
+  phases' updates: a read by a secondary key an earlier phase moved (a station's name, a
+  route's direction, a price's route) may find nothing, which the services answer with
+  application status 0 in an HTTP 200, a completed operation.
+- `create_read_delete_config` (weight 5 of 100) is not in the mix yet; `workload.HTTP("DELETE",
+  ...)` can now send it. The mix is 35/25/35 out of 95.
 - The fixture is fixed by `dataset.py` (servicebench drew a fresh one per run); request
   seeds are drawn per sample.
 
@@ -73,10 +73,6 @@ secondary keys). Two things changed with the framework:
   be `k8s.Image(context=".", dockerfile="path/Dockerfile", args={"MODULE": "..."})` besides a
   directory string, include the Dockerfile and the arguments in the tag's digest, and pass
   `--opt filename=...`, `--local dockerfile=...` and `--opt build-arg:K=V` to buildctl.
-- **HTTP DELETE.** The schema (`HTTP_METHOD_DELETE`) and loadgen support it; the Go SDK has
-  only `Get`/`Post`/`Put` and the Python SDK `get`/`post`/`put`. Adding `workload.Delete` and
-  `microservices.delete` (same options as `Put`) would let the mix get its create, read,
-  delete, negative-read operation back.
 
 ## The accuracy oracle (`evaluator/cmd/oracle`, not wired yet)
 
@@ -182,12 +178,11 @@ docker run --rm --network host --user "$(id -u):$(id -g)" \
 
 ```bash
 (cd .vibesys/tasks/train-ticket-k8s/evaluator && go test ./...)
-python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator at the pin, pyyaml, pytest
+python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs sdk/vibesys-evaluator/python installed, pyyaml, pytest
 ```
 
 The Go tests cover the fixture (pinned by `dataset.py`'s digest), the admin token, request
-building, the update grammar, the checks against canned responses (including the
-visibility rule), the generator's stream (deterministic, in the mix's proportions) and the
-seed against a fake API. The Python tests build bench.py's and check.py's objects, render
+building, the update grammar, the generator's stream (deterministic, in the mix's
+proportions, bodies kept only under capture) and the seed against a fake API. The Python tests build bench.py's and check.py's objects, render
 the manifest with the package's renderer, drive `benchmark(run)` with a fake run, and check
-that the Dockerfile and `evaluator/go.mod` pin the same vibesys commit.
+that the Dockerfile and `evaluator/go.mod` take vibesys-evaluator from the one copy.

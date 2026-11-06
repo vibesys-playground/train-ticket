@@ -1,8 +1,8 @@
 """The task pins vibesys-evaluator once per file, and the pins agree.
 
-The Dockerfile installs the Python package (PyPI), loadgen and otelcapture (go install) at
-the release VIBESYS_EVALUATOR_VERSION; the Go module (evaluator/go.mod) requires the Go SDK
-(the loadgen module) at that release.
+The Dockerfile installs the Python package from PyPI at the release VIBESYS_EVALUATOR_VERSION
+(its platform wheel bundles loadgen, otelcapture and the core's vibesys-evaluator binary); the
+Go module (evaluator/go.mod) requires the Go SDK at that release.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 TASK = Path(__file__).resolve().parents[1]
-MODULE = "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen"
+MODULE = "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go"
 ARG = "VIBESYS_EVALUATOR_VERSION"
 
 
@@ -21,18 +21,18 @@ def dockerfile_version() -> str:
     assert len(pins) == 1, f"the Dockerfile pins {ARG} once, before the first FROM"
     # A release tag of the Go SDK, not a commit or a pseudo-version.
     assert re.fullmatch(r"v\d+\.\d+\.\d+(-rc\.\d+)?", pins[0]), pins[0]
-    # Every install of the evaluator names the ARG, never a literal version or a source URL.
-    installs = [line for line in text.splitlines() if "vibesys-evaluator" in line and not line.startswith("#")]
-    go = [line for line in installs if MODULE in line]
-    pip = [line for line in installs if "pip install" in line]
-    assert len(go) == 2 and all(f"@${{{ARG}}}" in line for line in go), go
+    # The one install of the evaluator names the ARG, never a literal version, a source URL or
+    # a copy; the wheel brings the binaries, so nothing builds or installs them from Go.
+    lines = [line for line in text.splitlines() if not line.startswith("#")]
+    pip = [line for line in lines if "pip install" in line]
     assert pip == [f'RUN pip install --no-cache-dir "vibesys-evaluator==${{{ARG}#v}}"'], pip
-    assert "archive/" not in text and "git+" not in text
+    assert "go install" not in text and "archive/" not in text and "git+" not in text
+    assert "sdk/vibesys-evaluator" not in "\n".join(lines)
     return pins[0]
 
 
 def pep440(tag: str) -> str:
-    """What pip reads `${VERSION#v}` as: v0.2.0-rc.1 is 0.2.0rc1."""
+    """What pip reads `${VERSION#v}` as: v0.3.0-rc.1 is 0.3.0rc1."""
     return re.sub(r"-rc\.(\d+)$", r"rc\1", tag.removeprefix("v"))
 
 
@@ -49,8 +49,8 @@ def test_the_go_sdk_is_the_dockerfiles_release():
 
 
 def test_pip_reads_the_release_as_its_pypi_version():
-    assert pep440("v0.2.0-rc.1") == "0.2.0rc1"
-    assert pep440("v0.2.0") == "0.2.0"
+    assert pep440("v0.3.0-rc.1") == "0.3.0rc1"
+    assert pep440("v0.3.0") == "0.3.0"
     assert re.fullmatch(r"\d+\.\d+\.\d+(rc\d+)?", pep440(dockerfile_version()))
 
 
