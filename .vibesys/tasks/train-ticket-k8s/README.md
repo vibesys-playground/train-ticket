@@ -10,7 +10,7 @@ the correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | File | What it is |
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
-| `objectives.toml` | The two objectives; the noise values are placeholders until a base is measured. |
+| `objectives.toml` | The two objectives, each with the noise floor its base measure gave ("Measured (base)"). |
 | `Dockerfile` | The task image: vibesys-evaluator's microservices image at the release 0.3.0rc2, by tag and digest (the PyPI package with its bundled loadgen, otelcapture and core `vibesys-evaluator`, kubectl, buildctl), plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules; and the accuracy check (`python /task/bench.py accuracy --project-root ROOT`): the evaluator's accuracy run of the same system with its own workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
@@ -108,8 +108,8 @@ so. It did not:
   clients and the mix, not by which routes they name; with the key gone, more routes would only
   grow the collection that every listing and route search reads.
 
-So the workload keeps its keys; the drop is part of the base's numbers when the baseline is
-measured again.
+So the workload keeps its keys; the drop is part of the base's numbers ("Measured (base)":
+4818 ops/s over five samples).
 
 ## The accuracy check (`[accuracy]`)
 
@@ -202,22 +202,23 @@ clients, 3 phases, two rolling restarts), checked offline.
 
 ### Measured (base and two broken candidates)
 
-On vibesys-k8s-2 (a shared kind cluster), one run each (each run draws its own seed):
+On vibesys-k8s-2 (a shared kind cluster), with vibesys-evaluator 0.3.0rc2, one run each (each
+run draws its own seed):
 
 | Candidate | Verdict | Wall time | Calls (lost) | Pieces | Keys | Most in flight on a key | Check |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| The base | PASS | 7.2 min | 10332 (0) | 94119 | 407 | 2 | 2.2 s |
-| Trains cached by id, updates not invalidating | FAIL: 34 train keys (a read after an update shows the old train) | 7.2 min | 10207 (0) | 93323 | 392 | 2 | 2.0 s |
-| Config updates kept in memory only | FAIL: 15 config keys (after the config restart a listing shows the value before the update) | 7.3 min | 10314 (0) | 89722 | 390 | 2 | 2.6 s |
+| The base | PASS | 7.4 min | 10293 (0) | 92418 | 411 | 2 | 1.7 s |
+| Config updates kept in memory only | FAIL: 20 config keys (after the config restart a listing shows the value before the update) | 7.1 min | 10511 (0) | 95693 | 404 | 2 | 2.0 s |
+| Trains cached by id, updates not invalidating | FAIL: 36 train keys (a read after an update shows the old train) | 7.2 min | 10359 (0) | 93575 | 391 | 2 | 1.8 s |
 
 Every phase answered every request with a 2xx (about 2580 calls a phase: 7% creates, 12% deletes,
 19% updates, 7% upserts, 20% reads by key, 11% listings, 23% queries and joins). The faults
 are exercised: before its service's restart the workload changed catalog entities of every
-table (on the base, 7 deletes and 19 upserts of catalog routes before the route restart, 10
-deletes and 21 updates of catalog configs before the config restart, and so on), and the
-listings, reads and queries after it see what the restart re-seeded. The restarts took 15 to
-17 s each, and a run about 7 minutes: about 1 to deploy and seed, 4.3 of load, 1.6 of restarts,
-seconds to check.
+table (in one run of the base, 7 deletes and 19 upserts of catalog routes before the route
+restart, 10 deletes and 21 updates of catalog configs before the config restart, and so on),
+and the listings, reads and queries after it see what the restart re-seeded. The restarts took
+15 to 17 s each, and a run about 7 minutes: about 1 to deploy and seed, 4.3 of load, 1.6 of
+restarts, seconds to check.
 
 ## Resources
 
@@ -229,24 +230,41 @@ CPUs and 16.3 GiB at peak. A benchmark sample takes about 8 minutes, an accuracy
 
 ## Measured (base)
 
-To be measured again on the released evaluator (the numbers below are the earlier runner's,
-with the per-record key; "No per-record lock" has the difference). On the shared kind cluster (one 32-CPU node, sharing the host with other jobs), every phase of
-both samples valid (0 errors, 0 failed checks), seeded (224 entities, 448 requests) in 8 s:
+On vibesys-k8s (a shared kind cluster: one node on 32 of the host's 64 CPUs, which jobs outside
+the cluster also use), with vibesys-evaluator 0.3.0rc2, five samples of the base, each its own
+deployment, seed and namespace; every phase valid (no request error, every operation of the mix
+completed, the open loops offered their rate), seeded in 7 to 10 s, 8.3 to 8.6 minutes a sample:
 
-| Sample | First warmup | Closed loops (ops/s) | Open loops (rate, p99 ms) | Result | Time |
-| --- | --- | --- | --- | --- | --- |
-| 3ce8dbbf | 30 s | 3392, 4013, 5148 | 2809: 7.01, 6.88, 7.25 | 4013.2 ops/s, 7.01 ms | 11 min |
-| bac5b6c5 | 180 s | 5348, 5547, 4811 | 3744: 7.07, 7.50, 6.76 | 5347.9 ops/s, 7.07 ms | 22 min |
+| Sample seed | Closed loops (ops/s) | Open loops (rate: p99 ms) | Result |
+| --- | --- | --- | --- |
+| 5472255961397713206 | 4443, 4791, 4799 | 3354: 7.01, 6.95, 8.10 | 4791.3 ops/s, 7.01 ms |
+| 1311371194280895585 | 4666, 4854, 4948 | 3398: 7.46, 649.22, 7.47 | 4854.0 ops/s, 7.48 ms |
+| 3006667050301291512 | 5147, 4762, 4840 | 3388: 7.65, 7.20, 7.27 | 4839.7 ops/s, 7.27 ms |
+| 3489661498922462808 | 4994, 4726, 4717 | 3308: 7.71, 18.94, 21.60 | 4726.0 ops/s, 18.94 ms |
+| 8229105765312355147 | 4880, 5414, 4799 | 3416: 6.80, 1199.10, 6.88 | 4879.5 ops/s, 6.88 ms |
 
-With a 30 s warmup the closed loop was still warming up: the throughput climbed from 1300 to
-5300 ops/s over 170 s of load while the route service ran at its 2-CPU limit and its reads got
-faster (p50 94 ms to 20 ms); the other services used 1 to 1.5 CPUs and each MongoDB about 0.15.
-After 180 s it no longer climbs within a window (5200 to 6200 ops/s in 5 s buckets of the
-second trial); the third trial's dip (3900 to 5700 ops/s, every service slower and the route
-service below its limit) came with a host load average of 85 on 64 CPUs from jobs outside the
-cluster. In the closed loop route updates also waited for their route's exclusive key (32 routes,
-about 66 ms per update), which is what the closed loop's p99 (230 to 780 ms) shows; the open
-loop's p99 is the objective.
+- `operations_per_second`: mean 4818 ops/s, standard deviation 61 (1.3% of the mean).
+  `objectives.toml` declares `relative_noise = 0.02`.
+- `latency_ms.p99`: median 7.27 ms; four samples within 6.9 to 7.5 ms (mean 7.16, standard
+  deviation 3.7%), and one at 18.9 ms (the five: mean 9.5, deviation 55%). `objectives.toml`
+  declares `relative_noise = 0.05`, the clean samples' spread rounded up: a floor, which the
+  runs' own pooled spread replaces when it is larger, as it is when a sample like the fourth
+  is among them.
+
+The p99's outliers come from stalls. Four of the fifteen open-loop trials were hit. In two (649
+and 1199 ms) every service slowed past 100 ms at the same instant, then the train and config
+services stalled for 1 to 1.6 s and drained their backlog over the next 2 to 8 s; whether the
+host starts these (every service at once) or the two JVMs' own pauses prolong them, these runs
+cannot tell. In the fourth sample's last two (19 and 22 ms) every operation's tail rose evenly
+(p90 2 to 3 times the first trial's) with no stall, as under contention from the host's other
+jobs. The median of three absorbs one such trial, not two: about one sample in five. Five
+open-loop trials would make it rarer, at 80 s more a sample. The throughput's first trial,
+after the 180 s warmup, varies more (4443 to 5147) than the median of three does.
+
+Before the phase runner (with the per-record key, "No per-record lock"), the same schedule
+measured 5348 ops/s and 7.07 ms on one sample; with a 30 s first warmup the closed loop was still
+warming up (the throughput climbed from 1300 to 5300 ops/s over 170 s of load while the route
+service ran at its 2-CPU limit and its reads got faster), which is why the first warmup is 180 s.
 
 ## Running it
 
