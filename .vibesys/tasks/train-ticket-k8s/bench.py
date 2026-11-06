@@ -115,8 +115,11 @@ WORKLOAD = ms.Generator(["tt-generator"])  # on the task image's PATH
 
 CLIENTS = 128
 CLOSED_TRIALS, CLOSED_SECS, CLOSED_WARMUP = 3, 30, 10
-# The first trial warms the JVMs up (JIT compilation, connection pools) for longer.
-FIRST_WARMUP = 30
+# The first trial warms the JVMs up (JIT compilation, connection pools) for longer. On the
+# cluster, with 2 CPUs per service, the route service's throughput was still climbing after
+# 150 s of load (3400 -> 4000 -> 5100 ops/s over three trials after a 30 s warmup), so the
+# first window starts after 180 s.
+FIRST_WARMUP = 180
 OPEN_TRIALS, OPEN_SECS, OPEN_WARMUP = 3, 30, 10
 OPEN_LOOP_LOAD_FRACTION = 0.7
 
@@ -124,7 +127,7 @@ OPEN_LOOP_LOAD_FRACTION = 0.7
 def benchmark(run: ms.Run) -> None:
     """Capacity in a closed loop, then the p99 latency at 70% of it in an open loop.
 
-    Three closed-loop trials (128 clients, 30 s after a warmup of 30 s for the
+    Three closed-loop trials (128 clients, 30 s after a warmup of 180 s for the
     first and 10 s for the others): the throughput is their median. Three
     open-loop trials (10 s warmup, 30 s, evenly spaced arrivals) at 0.7 x that
     throughput: the p99 is their median. The sample's updates carry from phase

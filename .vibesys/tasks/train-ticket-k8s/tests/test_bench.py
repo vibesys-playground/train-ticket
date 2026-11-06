@@ -115,7 +115,7 @@ class FakeRun:
 def test_benchmark_reports_median_capacity_and_p99_at_seventy_percent():
     run = FakeRun([900.0, 1100.0, 1000.0], [12.0, 30.0, 15.0])
     bench.benchmark(run)
-    assert run.calls[:3] == [("closed", 128, 30, 30), ("closed", 128, 30, 10), ("closed", 128, 30, 10)]
+    assert run.calls[:3] == [("closed", 128, 30, 180), ("closed", 128, 30, 10), ("closed", 128, 30, 10)]
     assert run.calls[3:] == [("open", pytest.approx(700.0), 30, 10, "uniform")] * 3
     assert run.reported == {"operations_per_second": 1000.0, "latency_ms.p99": 15.0}
     assert set(run.reported) == set(bench.METRICS)
