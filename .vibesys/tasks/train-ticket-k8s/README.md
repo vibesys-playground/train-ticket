@@ -78,6 +78,47 @@ secondary keys). Two things changed with the framework:
   `microservices.delete` (same options as `Put`) would let the mix get its create, read,
   delete, negative-read operation back.
 
+## The accuracy oracle (`evaluator/cmd/oracle`, not wired yet)
+
+The model-based replacement for the interim check: Train Ticket's semantics as plain Go over
+per-entity state (`evaluator/internal/ttoracle`), on vibesys-evaluator's `go/check` package
+(authoring guide: `sdk/vibesys-evaluator/docs/accuracy-checks.md`). `cmd/oracle` is
+`check.Main`: `oracle --history DIR [--out DIR]` re-checks a captured history offline and exits
+0 (PASS), 1 (FAIL) or 2 (UNKNOWN). `internal/ttapi` holds what the oracle and the future
+accuracy workload share: the operation `Info` the workload must emit, the HTTP request each
+operation maps to, strict entity schemas and the response parser.
+
+- **Keys** are entities (`station/shanghai`, `route/<id>`, `travel/G1234`). A listing, a
+  secondary-index query (route between two stations, trips by route, price by route and train,
+  station id by name) or a trip-to-route/train join is projected onto the keys it could have
+  returned: per-key views, no whole-collection snapshots (Mongo's `findAll` is not one).
+- **The model is the application as it is** (found on the real deployment): a restart re-applies
+  the service's seed (create-if-absent; an upsert for route and price); config/station/train
+  create is find-then-save, so overlapping creates can both succeed; route and price POST are
+  upserts with server-generated ids for a short id; route DELETE answers 0 when a concurrent
+  upsert brought the route back; duplicate trip create and update of a missing trip answer
+  status 1 and change nothing; the trip-to-route join answers an empty route when the route is
+  gone and carries only id, stations and distances.
+- **Statuses**: 2xx known; 5xx or a lost response unknown (the write may or may not have taken
+  effect, within 10 s); any other status, a malformed body or a schema violation fails the check
+  without a search.
+- **Dataset** (`dataset.json` in the history): `{"initial": {table: [entity]}, "reinit": ...}`,
+  both in the shape of `seed_catalog.json` (`initial`: what exists when the history starts,
+  the seed Job's fixture included; `reinit`: what a restart re-applies, default `initial`).
+
+Tests (`go test ./...` in `evaluator/`): synthetic concurrent histories of an in-memory fake
+(`internal/ttfake`) that the oracle accepts, with lost responses, with restart re-seeding; seven
+injected bugs and two proxy mutants (stale reads, a dropped field) that it fails; hand-written
+racy-create and dangling-join histories; and `testdata/real-capture.json.gz`, a history recorded
+against the real services on kind (6 clients, 3 phases, two rolling restarts), checked offline.
+
+What the accuracy command will look like once the evaluator's accuracy flow exists (it deploys,
+seeds, runs the phases at a fixed open-loop rate with the restarts between them, and captures
+the history): `[accuracy] command = ["tt-oracle", "--history", "${HISTORY_DIR}"]` with the task
+image building `tt-oracle` from `evaluator/cmd/oracle`. Nothing in this directory calls it yet:
+`check.py` stays the `[accuracy]` command until then, and the accuracy workload (which must
+emit `ttapi.Info` as the operations' info, one step per operation) is written with the flow.
+
 ## The interim check (`[accuracy]`)
 
 The task's own correctness check is still to be designed. Until then, `check.py` deploys the

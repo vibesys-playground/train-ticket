@@ -9,4 +9,11 @@ require (
 	google.golang.org/protobuf v1.36.12
 )
 
-require buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.9-20250912141014-52f32327d4b0.1 // indirect
+// The accuracy oracle's checker (go/check), at a pseudo-version of vibesys main (cdb35bd1f, PR #3961);
+// switch to the release tag once go/check is released.
+require github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go v0.0.0-20261106083534-cdb35bd1f4f6
+
+require (
+	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.9-20250912141014-52f32327d4b0.1 // indirect
+	github.com/anishathalye/porcupine v1.3.1 // indirect
+)
