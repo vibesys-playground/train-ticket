@@ -3,7 +3,7 @@
 The Dockerfile installs the PyPI package `vibesys-evaluator` at a version (the ARG
 VIBESYS_EVALUATOR_VERSION; the wheel bundles the core, loadgen and otelcapture) on a
 digest-pinned python base; the Go module (evaluator/go.mod) requires the Go SDK at the same
-release, whose tag spells the version the semver way (v0.3.0-rc.2 is 0.3.0rc2).
+release, whose tag spells the version the semver way (v0.3.0-rc.3 is 0.3.0rc3).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def dockerfile_version() -> str:
 
 
 def pep440(tag: str) -> str:
-    """The Go SDK's tag as a PyPI version: v0.3.0-rc.2 is 0.3.0rc2."""
+    """The Go SDK's tag as a PyPI version: v0.3.0-rc.3 is 0.3.0rc3."""
     return re.sub(r"-rc\.(\d+)$", r"rc\1", tag.removeprefix("v"))
 
 
@@ -57,7 +57,7 @@ def test_the_go_sdk_is_the_pypi_release():
 
 
 def test_the_go_tag_reads_as_the_pypi_version():
-    assert pep440("v0.3.0-rc.2") == "0.3.0rc2"
+    assert pep440("v0.3.0-rc.3") == "0.3.0rc3"
     assert pep440("v0.3.0") == "0.3.0"
 
 

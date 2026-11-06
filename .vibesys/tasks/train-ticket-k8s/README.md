@@ -11,7 +11,7 @@ the correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives, each with the noise floor its base measure gave ("Measured (base)"). |
-| `Dockerfile` | The task image: a digest-pinned `python:3.12.12-slim-bookworm` with the PyPI package `vibesys-evaluator==0.3.0rc2` (bundling loadgen, otelcapture and the core `vibesys-evaluator`), kubectl and buildctl, plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
+| `Dockerfile` | The task image: a digest-pinned `python:3.12.12-slim-bookworm` with the PyPI package `vibesys-evaluator==0.3.0rc3` (bundling loadgen, otelcapture and the core `vibesys-evaluator`), kubectl and buildctl, plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules; and the accuracy check (`python /task/bench.py accuracy --project-root ROOT`): the evaluator's accuracy run of the same system with its own workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
@@ -292,7 +292,7 @@ image) re-checks its history.
 
 ```bash
 (cd .vibesys/tasks/train-ticket-k8s/evaluator && go test ./...)
-python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator==0.3.0rc2, pyyaml, pytest
+python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator==0.3.0rc3, pyyaml, pytest
 ```
 
 The Go tests cover the fixture (pinned by `dataset.py`'s digest), the admin token, request
