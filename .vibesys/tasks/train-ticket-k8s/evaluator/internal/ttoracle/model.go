@@ -61,10 +61,10 @@ type Out struct {
 
 type rec struct{ Call, Ret int64 }
 
-// State is one entity's state. Recent remembers the creates that took effect lately, for the
-// racy-create rule; it is pruned at Op.Floor.
+// State is one entity's state (its key is the partition's: Op.Keys[0], Init's and Fault's
+// keys[0]). Recent remembers the creates that took effect lately, for the racy-create rule; it is
+// pruned at Op.Floor.
 type State struct {
-	Key    string
 	Ent    string // canonical entity; "" = absent
 	Recent []rec
 }
@@ -106,7 +106,7 @@ func (s State) overlapsCreate(call, ret int64) bool {
 }
 
 func equal(a, b State) bool {
-	if a.Key != b.Key || a.Ent != b.Ent || len(a.Recent) != len(b.Recent) {
+	if a.Ent != b.Ent || len(a.Recent) != len(b.Recent) {
 		return false
 	}
 	for i := range a.Recent {
@@ -124,8 +124,6 @@ func hash(s State) uint64 {
 			h = (h ^ uint64(c)) * 1099511628211
 		}
 	}
-	mix([]byte(s.Key))
-	mix([]byte{0})
 	mix([]byte(s.Ent))
 	for _, r := range s.Recent {
 		h = (h ^ uint64(r.Call)) * 1099511628211
@@ -160,7 +158,7 @@ func Spec(d *Dataset) (*check.Spec[State, In, Out], error) {
 	return &check.Spec[State, In, Out]{
 		Name:         "train-ticket",
 		Project:      m.project,
-		Init:         func(keys []string) State { return State{Key: keys[0], Ent: sd.initial[keys[0]]} },
+		Init:         func(keys []string) State { return State{Ent: sd.initial[keys[0]]} },
 		Step:         m.step,
 		Fault:        m.fault,
 		Equal:        equal,
@@ -168,9 +166,9 @@ func Spec(d *Dataset) (*check.Spec[State, In, Out], error) {
 		EffectWindow: effectWindow,
 		DescribeState: func(s State) string {
 			if s.Ent == "" {
-				return s.Key + " absent"
+				return "absent"
 			}
-			return s.Key + " = " + s.Ent
+			return s.Ent
 		},
 		DescribeOp: func(op check.Op[In, Out]) string {
 			in := op.In
@@ -239,23 +237,41 @@ var cfgs = map[string]cfg{
 	"route": {0, 0, 1}, "price": {0, 0, 0}, "travel": {1, 1, 0},
 }
 
-// fault: a restart of a service re-applies its seed. Target is the service ("station",
-// "ts-station-service") or "" / "all" for every service (restart_all).
-func (m *model) fault(s State, f check.Fault) []State {
+// ServiceTable is the table a service's Deployment owns: ts-route-service owns route, and so on
+// (ts-travel-service owns the trips, table travel); "" for any other Deployment.
+func ServiceTable(deployment string) string {
+	t, ok := strings.CutPrefix(deployment, "ts-")
+	if !ok {
+		return ""
+	}
+	t, ok = strings.CutSuffix(t, "-service")
+	if !ok {
+		return ""
+	}
+	for _, table := range ttapi.Tables {
+		if t == table {
+			return t
+		}
+	}
+	return ""
+}
+
+// fault: a restart of a service (one pod or every pod of its Deployment: the services run one
+// replica, so both are the same) re-applies its seed to its own table. Any other fault (an exec,
+// a restart of another Deployment) changes nothing: acknowledged writes are durable.
+func (m *model) fault(s State, keys []string, f check.Fault) []State {
 	if f.Kind != "restart" && f.Kind != "restart_all" {
 		return []State{s}
 	}
-	t := tableOf(s.Key)
-	if f.Kind == "restart" {
-		target := strings.TrimSuffix(strings.TrimPrefix(f.Target, "ts-"), "-service")
-		if target != t {
-			return []State{s}
-		}
+	key := keys[0]
+	if ServiceTable(f.Target) != tableOf(key) {
+		return []State{s}
 	}
-	e, ok := m.seed.reinit[s.Key]
+	e, ok := m.seed.reinit[key]
 	if !ok {
 		return []State{s}
 	}
+	t := tableOf(key)
 	if s.Ent == "" || t == "route" || t == "price" { // InitData: create-if-absent, upsert for route and price
 		s.Ent = e
 	}
@@ -287,12 +303,12 @@ func write(s State, in In, op check.Op[In, Out]) (State, bool) {
 }
 
 func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
-	in, out := op.In, op.Out
+	in, out, key := op.In, op.Out, op.Keys[0]
 	s = s.pruned(op.Floor)
 	one := func(n State) ([]State, string) { return []State{n}, "" }
 	switch in.Kind {
 	case kGenUpsert:
-		id := strings.TrimPrefix(s.Key, in.Table+"/")
+		id := strings.TrimPrefix(key, in.Table+"/")
 		gen := ttapi.WithID(in.E, id)
 		if op.Unknown { // a lost generate-id upsert may have created this (orphan) key
 			if s.Ent != "" {
@@ -301,7 +317,7 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 			return []State{s, s.with(gen)}, ""
 		}
 		if s.Ent != "" {
-			return nil, fmt.Sprintf("the server generated %s, which already exists", s.Key)
+			return nil, fmt.Sprintf("the server generated %s, which already exists", key)
 		}
 		if out.Status != 1 || out.Ent != gen {
 			return nil, fmt.Sprintf("generated-id upsert answered status %d entity %s, want %s", out.Status, out.Ent, gen)
@@ -344,7 +360,7 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 			want, n = 1, s.with("")
 		}
 		if out.Status != want {
-			return nil, fmt.Sprintf("%s %s answered status %d; with %s the answer is %d", in.Kind, s.Key, out.Status, present(s), want)
+			return nil, fmt.Sprintf("%s %s answered status %d; with %s the answer is %d", in.Kind, key, out.Status, present(s), want)
 		}
 		if in.Kind == kUpsert && out.Ent != in.E {
 			return nil, fmt.Sprintf("upsert echoed %s, sent %s", out.Ent, in.E)
@@ -353,12 +369,12 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 	case kGet:
 		if s.Ent == "" {
 			if out.Present {
-				return nil, fmt.Sprintf("%s is absent but the read returned %s", s.Key, out.Ent)
+				return nil, fmt.Sprintf("%s is absent but the read returned %s", key, out.Ent)
 			}
 			return one(s)
 		}
 		if !out.Present {
-			return nil, fmt.Sprintf("%s exists (%s) but the read found nothing", s.Key, s.Ent)
+			return nil, fmt.Sprintf("%s exists (%s) but the read found nothing", key, s.Ent)
 		}
 		if out.Ent != s.Ent {
 			return nil, fmt.Sprintf("read %s, the model has %s", out.Ent, s.Ent)
@@ -367,7 +383,7 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 	case kName:
 		if s.Ent == "" {
 			if out.Present {
-				return nil, fmt.Sprintf("%s is absent but its name was answered %q", s.Key, out.Val)
+				return nil, fmt.Sprintf("%s is absent but its name was answered %q", key, out.Val)
 			}
 			return one(s)
 		}
@@ -379,9 +395,9 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 		match := s.Ent != "" && ttapi.Matches(in.Q, in.A, in.B, s.Ent)
 		if out.Present != match {
 			if out.Present {
-				return nil, fmt.Sprintf("%s is in the answer but %s", s.Key, why(s, in))
+				return nil, fmt.Sprintf("%s is in the answer but %s", key, why(s))
 			}
-			return nil, fmt.Sprintf("%s is missing from the answer, yet it %s", s.Key, "is "+s.Ent)
+			return nil, fmt.Sprintf("%s is missing from the answer, yet it is %s", key, s.Ent)
 		}
 		if match && out.Ent != "" && out.Ent != s.Ent {
 			return nil, fmt.Sprintf("answer has %s, the model has %s", out.Ent, s.Ent)
@@ -394,12 +410,12 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 		}
 		if !out.Present { // tripRoute status 0: no such trip
 			if s.Ent != "" {
-				return nil, fmt.Sprintf("trip %s exists, the join answered nothing", s.Key)
+				return nil, fmt.Sprintf("trip %s exists, the join answered nothing", key)
 			}
 			return one(s)
 		}
 		if s.Ent == "" {
-			return nil, fmt.Sprintf("trip %s is absent but the join answered", s.Key)
+			return nil, fmt.Sprintf("trip %s is absent but the join answered", key)
 		}
 		if !out.Empty && ttapi.StrField(s.Ent, ref) != out.Val {
 			return nil, fmt.Sprintf("join answered %s %q, the trip has %q", ref, out.Val, ttapi.StrField(s.Ent, ref))
@@ -411,7 +427,7 @@ func (m *model) step(s State, op check.Op[In, Out]) ([]State, string) {
 			cur = ttapi.ProjRoute(cur)
 		}
 		if cur == "" {
-			return nil, fmt.Sprintf("%s is absent but a join returned %s (dangling reference)", s.Key, out.Ent)
+			return nil, fmt.Sprintf("%s is absent but a join returned %s (dangling reference)", key, out.Ent)
 		}
 		if cur != out.Ent {
 			return nil, fmt.Sprintf("join returned %s, the model has %s", out.Ent, cur)
@@ -428,7 +444,7 @@ func present(s State) string {
 	return "the entity present"
 }
 
-func why(s State, in In) string {
+func why(s State) string {
 	if s.Ent == "" {
 		return "it is absent"
 	}

@@ -98,7 +98,7 @@ func (f *Fake) Restart() (kind, target string) {
 			f.put(t, id, e)
 		}
 	}
-	return "restart", t
+	return "restart", "ts-" + t + "-service" // the service's Deployment, as the accuracy run names it
 }
 
 func (f *Fake) restart() {

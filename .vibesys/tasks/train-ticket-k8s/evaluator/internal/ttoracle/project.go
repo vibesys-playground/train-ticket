@@ -12,20 +12,28 @@ import (
 	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/check"
 )
 
-// deferred is a piece that needs the whole history's keys (a listing, an index query that found
-// nothing, a lost generate-id upsert): it is added after the loop, one piece per candidate key.
-type deferred struct {
-	kind  string // list | set | none | ghost
-	info  ttapi.Info
-	table string
-	ent   string            // ghost: the request's entity
-	out   map[string]string // list/set: key -> canonical entity in the answer
-	call  *check.Call       // copy without bodies
-}
-
+// universe is what the projection knows about the whole history: every key it mentions with
+// every version of the key's entity the seed or the history shows, and the keys some write (or
+// the seed) brings into being. A listing, an index query that found nothing and a lost
+// generated-id upsert need it, so Project collects it in a first pass and adds the pieces in a
+// second.
 type universe struct {
 	versions map[string]map[string]bool // key -> every canonical version the seed or the history mentions
 	creators map[string]bool            // keys some write or the seed brings into being
+	orphans  map[string][]string        // table -> keys no write or seed brings into being, sorted
+}
+
+func newUniverse(sd *seed) *universe {
+	u := &universe{versions: map[string]map[string]bool{}, creators: map[string]bool{}}
+	for k, e := range sd.initial {
+		u.version(k, e)
+		u.creators[k] = true
+	}
+	for k, e := range sd.reinit { // a restart can bring these back
+		u.version(k, e)
+		u.creators[k] = true
+	}
+	return u
 }
 
 func (u *universe) touch(key string) {
@@ -34,6 +42,19 @@ func (u *universe) touch(key string) {
 	}
 }
 func (u *universe) version(key, ent string) { u.touch(key); u.versions[key][ent] = true }
+
+// seal computes the orphans once every key is known.
+func (u *universe) seal() {
+	u.orphans = map[string][]string{}
+	for k := range u.versions {
+		if !u.creators[k] {
+			u.orphans[tableOf(k)] = append(u.orphans[tableOf(k)], k)
+		}
+	}
+	for _, ks := range u.orphans {
+		sort.Strings(ks)
+	}
+}
 
 func (u *universe) keys(table string) []string {
 	var ks []string
@@ -55,168 +76,216 @@ func (u *universe) anyVersion(key string, f func(ent string) bool) bool {
 	return false
 }
 
-func strip(c *check.Call) *check.Call {
-	cc := *c
-	cc.Steps = make([]check.Step, len(c.Steps))
-	for i, s := range c.Steps {
-		s.Body = nil
-		cc.Steps[i] = s
-	}
-	return &cc
+// parsed is a call as the projection reads it.
+type parsed struct {
+	info    ttapi.Info
+	ent     string // the canonical entity the request carries, or ""
+	write   bool
+	unknown bool      // a lost response or a 5xx: the outcome is unknown
+	out     ttapi.Out // the parsed response of a known outcome
+	bad     string    // a violation: the response is wrong on its own
 }
 
-// project turns calls into pieces. Statuses: a 2xx is a known outcome; a 5xx or a lost response an
-// unknown one; any other status is a violation.
+// parse reads a call: statuses: a 2xx is a known outcome; a 5xx or a lost response an unknown
+// one; any other status, a malformed body or a schema violation is a violation. An error is a
+// task bug (an info the oracle does not know).
+func parse(c *check.Call) (parsed, error) {
+	var p parsed
+	if err := json.Unmarshal(c.Info, &p.info); err != nil {
+		return p, fmt.Errorf("%s %d: info: %w", c.Op, c.Index, err)
+	}
+	if c.Op != p.info.OpName() {
+		return p, fmt.Errorf("%s %d: operation name does not match its info (%s)", c.Op, c.Index, p.info.OpName())
+	}
+	if len(c.Steps) != 1 {
+		return p, fmt.Errorf("%s %d: %d steps, the accuracy workload sends one", c.Op, c.Index, len(c.Steps))
+	}
+	if len(p.info.Entity) > 0 {
+		_, canon, err := ttapi.Canon(p.info.Table, p.info.Entity)
+		if err != nil {
+			return p, fmt.Errorf("%s %d: entity: %w", c.Op, c.Index, err)
+		}
+		p.ent = canon
+	}
+	switch p.info.Op {
+	case "create", "update", "upsert", "delete":
+		p.write = true
+	case "get", "list", "query":
+	default:
+		return p, fmt.Errorf("%s %d: unknown op %q", c.Op, c.Index, p.info.Op)
+	}
+	if p.info.Op == "query" {
+		switch {
+		case p.info.Q == "stationName", ttapi.IsFind1(p.info.Q), ttapi.IsSet(p.info.Q), ttapi.IsJoin(p.info.Q):
+		default:
+			return p, fmt.Errorf("%s %d: unknown query %q", c.Op, c.Index, p.info.Q)
+		}
+	}
+	if c.Lost() {
+		p.unknown = true
+		return p, nil
+	}
+	st := c.Steps[0].Status
+	switch {
+	case st >= 500:
+		p.unknown = true
+	case st >= 200 && st < 300:
+		p.out = ttapi.Parse(p.info, st, c.Steps[0].Body)
+		if p.out.Bad != "" {
+			p.bad = p.out.Bad
+		}
+	default:
+		p.bad = fmt.Sprintf("answered HTTP %d", st)
+	}
+	return p, nil
+}
+
+// generated says whether the server picks the write's id (a route or price upsert with a short id).
+func (p *parsed) generated() bool { return p.ent != "" && p.info.Generated(p.ent) }
+
+// learn adds what a call shows about the whole history to the universe (the first pass).
+func (u *universe) learn(p *parsed) {
+	if p.bad != "" {
+		return
+	}
+	info, o := p.info, p.out
+	if !p.unknown {
+		for _, e := range o.Ents {
+			if info.Op != "query" || !ttapi.IsJoin(info.Q) {
+				u.version(ttapi.KeyOf(tableOfOut(info), e), e)
+			}
+		}
+	}
+	if p.unknown && !p.write {
+		return
+	}
+	switch info.Op {
+	case "create", "update", "upsert", "delete":
+		if p.generated() {
+			if !p.unknown && len(o.Ents) == 1 {
+				u.creators[ttapi.KeyOf(info.Table, o.Ents[0])] = true
+			}
+			return
+		}
+		key := info.Table + "/" + info.Key
+		if p.ent != "" {
+			key = ttapi.KeyOf(info.Table, p.ent)
+			u.version(key, p.ent)
+		}
+		u.touch(key)
+		u.creators[key] = true
+	case "get":
+		u.touch(info.Table + "/" + info.Key)
+	case "query":
+		switch {
+		case info.Q == "stationName":
+			u.touch("station/" + info.Key)
+		case info.Q == "stationId" && o.Status == 1:
+			u.touch("station/" + o.Val)
+		case ttapi.IsJoin(info.Q):
+			u.touch("travel/" + info.Key)
+			if o.Status == 1 && o.Val != "empty" && len(o.Ents) == 1 {
+				rt := "route"
+				if info.Q == "tripTrain" {
+					rt = "train"
+				}
+				u.touch(rt + "/" + ttapi.StrField(o.Ents[0], "id"))
+			}
+		}
+	}
+}
+
+// project turns calls into pieces, in two passes over the history: the universe (every key and
+// version, the keys writes bring into being), then the pieces. A call whose outcome touches no
+// key it can be checked against (an unknown read, a lost generated-id upsert with no key it could
+// have made, a query nothing could have matched) becomes a piece without keys: it is counted (an
+// unknown one toward the lost share) and not searched.
 func (m *model) project(phases iter.Seq[[]check.Call], out *check.Projection[In, Out]) error {
-	u := &universe{versions: map[string]map[string]bool{}, creators: map[string]bool{}}
-	for k, e := range m.seed.initial {
-		u.version(k, e)
-		u.creators[k] = true
+	u := newUniverse(m.seed)
+	for calls := range phases {
+		for i := range calls {
+			p, err := parse(&calls[i])
+			if err != nil {
+				return err
+			}
+			u.learn(&p)
+		}
 	}
-	for k, e := range m.seed.reinit { // a restart can bring these back
-		u.version(k, e)
-		u.creators[k] = true
-	}
-	var later []deferred
+	u.seal()
 	for calls := range phases {
 		for i := range calls {
 			c := &calls[i]
-			var info ttapi.Info
-			if err := json.Unmarshal(c.Info, &info); err != nil {
-				return fmt.Errorf("%s %d: info: %w", c.Op, c.Index, err)
+			p, err := parse(c)
+			if err != nil {
+				return err
 			}
-			if c.Op != info.OpName() {
-				return fmt.Errorf("%s %d: operation name does not match its info (%s)", c.Op, c.Index, info.OpName())
+			if p.bad != "" {
+				out.Violation(c, "%s: %s", c.Op, p.bad)
+				continue
 			}
-			ent := ""
-			if len(info.Entity) > 0 {
-				_, c2, err := ttapi.Canon(info.Table, info.Entity)
-				if err != nil {
-					return fmt.Errorf("%s %d: entity: %w", c.Op, c.Index, err)
-				}
-				ent = c2
-			}
-			write := info.Op == "create" || info.Op == "update" || info.Op == "upsert" || info.Op == "delete"
-			unknown := false
-			var o ttapi.Out
-			if c.Lost() {
-				unknown = true
-			} else {
-				st := c.Steps[len(c.Steps)-1].Status
-				switch {
-				case st >= 500:
-					unknown = true
-				case st >= 200 && st < 300:
-					o = ttapi.Parse(info, st, c.Steps[len(c.Steps)-1].Body)
-					if o.Bad != "" {
-						out.Violation(c, "%s: %s", c.Op, o.Bad)
-						continue
-					}
-				default:
-					out.Violation(c, "%s answered HTTP %d", c.Op, st)
-					continue
-				}
-			}
-			if !unknown {
-				for _, e := range o.Ents {
-					if info.Op != "query" || !ttapi.IsJoin(info.Q) {
-						u.version(ttapi.KeyOf(tableOfOut(info), e), e)
-					}
-				}
-			}
-			if unknown && !write {
-				continue // an unknown read tells nothing
-			}
-			gen := ent != "" && info.Generated(ent)
-			piece := func(key string, in In, out2 Out) check.Piece[In, Out] {
-				return check.Piece[In, Out]{Keys: []string{key}, In: in, Out: out2, Unknown: unknown, Write: write, Origin: c}
-			}
-			switch info.Op {
-			case "create", "update", "upsert", "delete":
-				if gen {
-					if unknown {
-						later = append(later, deferred{kind: "ghost", info: info, table: info.Table, ent: ent, call: strip(c)})
-						continue
-					}
-					if len(o.Ents) != 1 {
-						out.Violation(c, "%s: generated-id upsert answered no entity", c.Op)
-						continue
-					}
-					key := ttapi.KeyOf(info.Table, o.Ents[0])
-					u.creators[key] = true
-					out.Add(piece(key, In{Kind: kGenUpsert, Table: info.Table, E: ent}, Out{Status: o.Status, Ent: o.Ents[0]}))
-					continue
-				}
-				key := info.Table + "/" + info.Key
-				if ent != "" {
-					key = ttapi.KeyOf(info.Table, ent)
-					u.version(key, ent)
-				}
-				u.touch(key)
-				u.creators[key] = true
-				in := In{Kind: info.Op, Table: info.Table, E: ent}
-				var o2 Out
-				if !unknown {
-					o2.Status = o.Status
-					if len(o.Ents) == 1 {
-						o2.Ent = o.Ents[0]
-					}
-				}
-				out.Add(piece(key, in, o2))
-			case "get":
-				key := info.Table + "/" + info.Key
-				u.touch(key)
-				o2 := Out{Present: o.Status == 1}
-				if len(o.Ents) == 1 {
-					o2.Ent = o.Ents[0]
-				}
-				out.Add(piece(key, In{Kind: kGet, Table: info.Table}, o2))
-			case "list":
-				later = append(later, deferred{kind: "list", info: info, table: info.Table, out: byKey(info.Table, o.Ents), call: strip(c)})
-			case "query":
-				if err := m.projectQuery(c, info, o, u, &later, out); err != nil {
-					return err
-				}
-			default:
-				return fmt.Errorf("%s %d: unknown op %q", c.Op, c.Index, info.Op)
-			}
-		}
-	}
-	// pieces that need every key the history mentions
-	orphans := map[string][]string{}
-	for k := range u.versions {
-		if !u.creators[k] {
-			orphans[tableOf(k)] = append(orphans[tableOf(k)], k)
-		}
-	}
-	for _, ks := range orphans {
-		sort.Strings(ks)
-	}
-	for _, d := range later {
-		add := func(key string, in In, o Out, unknown, write bool) {
-			out.Add(check.Piece[In, Out]{Keys: []string{key}, In: in, Out: o, Unknown: unknown, Write: write, Origin: d.call})
-		}
-		switch d.kind {
-		case "ghost":
-			for _, k := range orphans[d.table] {
-				add(k, In{Kind: kGenUpsert, Table: d.table, E: d.ent}, Out{}, true, true)
-			}
-		case "list":
-			for _, k := range u.keys(d.table) {
-				e, ok := d.out[k]
-				add(k, In{Kind: kMember, Table: d.table}, Out{Present: ok, Ent: e}, false, false)
-			}
-		case "set", "none":
-			t := ttapi.QueryTable(d.info.Q)
-			for _, k := range u.keys(t) {
-				e, ok := d.out[k]
-				if ok || u.anyVersion(k, func(v string) bool { return ttapi.Matches(d.info.Q, d.info.A, d.info.B, v) }) {
-					add(k, In{Kind: kMember, Table: t, Q: d.info.Q, A: d.info.A, B: d.info.B}, Out{Present: ok, Ent: e}, false, false)
-				}
+			if n := m.pieces(c, &p, u, out); n == 0 {
+				out.Add(check.Piece[In, Out]{In: In{Kind: p.info.Op, Table: p.info.Table, Q: p.info.Q}, Unknown: p.unknown, Write: p.write, Origin: c})
 			}
 		}
 	}
 	return nil
+}
+
+// pieces adds the pieces of one call and returns how many it added.
+func (m *model) pieces(c *check.Call, p *parsed, u *universe, out *check.Projection[In, Out]) int {
+	info, o := p.info, p.out
+	n := 0
+	add := func(key string, in In, o2 Out) {
+		out.Add(check.Piece[In, Out]{Keys: []string{key}, In: in, Out: o2, Unknown: p.unknown, Write: p.write, Origin: c})
+		n++
+	}
+	if p.unknown && !p.write {
+		return 0 // an unknown read tells nothing
+	}
+	switch info.Op {
+	case "create", "update", "upsert", "delete":
+		if p.generated() {
+			if p.unknown { // it may have made any key no acknowledged write claims
+				for _, k := range u.orphans[info.Table] {
+					add(k, In{Kind: kGenUpsert, Table: info.Table, E: p.ent}, Out{})
+				}
+				return n
+			}
+			if len(o.Ents) != 1 {
+				out.Violation(c, "%s: generated-id upsert answered no entity", c.Op)
+				return -1
+			}
+			add(ttapi.KeyOf(info.Table, o.Ents[0]), In{Kind: kGenUpsert, Table: info.Table, E: p.ent}, Out{Status: o.Status, Ent: o.Ents[0]})
+			return n
+		}
+		key := info.Table + "/" + info.Key
+		if p.ent != "" {
+			key = ttapi.KeyOf(info.Table, p.ent)
+		}
+		var o2 Out
+		if !p.unknown {
+			o2.Status = o.Status
+			if len(o.Ents) == 1 {
+				o2.Ent = o.Ents[0]
+			}
+		}
+		add(key, In{Kind: info.Op, Table: info.Table, E: p.ent}, o2)
+	case "get":
+		o2 := Out{Present: o.Status == 1}
+		if len(o.Ents) == 1 {
+			o2.Ent = o.Ents[0]
+		}
+		add(info.Table+"/"+info.Key, In{Kind: kGet, Table: info.Table}, o2)
+	case "list":
+		got := byKey(info.Table, o.Ents)
+		for _, k := range u.keys(info.Table) {
+			e, ok := got[k]
+			add(k, In{Kind: kMember, Table: info.Table}, Out{Present: ok, Ent: e})
+		}
+	case "query":
+		return m.queryPieces(c, info, o, u, add, out)
+	}
+	return n
 }
 
 func tableOfOut(i ttapi.Info) string {
@@ -234,68 +303,67 @@ func byKey(table string, ents []string) map[string]string {
 	return m
 }
 
-func (m *model) projectQuery(c *check.Call, info ttapi.Info, o ttapi.Out, u *universe, later *[]deferred, out *check.Projection[In, Out]) error {
-	unknown := c.Lost() || c.Steps[len(c.Steps)-1].Status >= 500
-	if unknown {
-		return nil // reads
-	}
+// queryPieces adds the pieces of a query with a known outcome and returns how many it added (-1
+// after a violation).
+func (m *model) queryPieces(c *check.Call, info ttapi.Info, o ttapi.Out, u *universe, add func(string, In, Out), out *check.Projection[In, Out]) int {
+	n := 0
+	add1 := func(key string, in In, o2 Out) { add(key, in, o2); n++ }
 	t := ttapi.QueryTable(info.Q)
-	add := func(key string, in In, o2 Out) {
-		out.Add(check.Piece[In, Out]{Keys: []string{key}, In: in, Out: o2, Origin: c})
+	// matching: every key some version of which the query could have returned, and the keys
+	// the answer holds.
+	matching := func(got map[string]string) {
+		for _, k := range u.keys(t) {
+			e, ok := got[k]
+			if ok || u.anyVersion(k, func(v string) bool { return ttapi.Matches(info.Q, info.A, info.B, v) }) {
+				add1(k, In{Kind: kMember, Table: t, Q: info.Q, A: info.A, B: info.B}, Out{Present: ok, Ent: e})
+			}
+		}
 	}
 	switch {
 	case info.Q == "stationName":
-		key := "station/" + info.Key
-		u.touch(key)
-		add(key, In{Kind: kName, Table: "station"}, Out{Present: o.Status == 1, Val: o.Val})
+		add1("station/"+info.Key, In{Kind: kName, Table: "station"}, Out{Present: o.Status == 1, Val: o.Val})
 	case ttapi.IsSet(info.Q):
-		*later = append(*later, deferred{kind: "set", info: info, table: t, out: byKey(t, o.Ents), call: strip(c)})
+		matching(byKey(t, o.Ents))
 	case ttapi.IsFind1(info.Q):
 		if o.Status == 0 {
-			*later = append(*later, deferred{kind: "none", info: info, table: t, out: map[string]string{}, call: strip(c)})
-			return nil
+			matching(map[string]string{})
+			return n
 		}
 		in := In{Kind: kMember, Table: t, Q: info.Q, A: info.A, B: info.B}
 		if info.Q == "stationId" {
-			key := "station/" + o.Val
-			u.touch(key)
-			add(key, in, Out{Present: true})
-		} else {
-			if len(o.Ents) != 1 {
-				out.Violation(c, "%s: found without an entity", c.Op)
-				return nil
-			}
-			add(ttapi.KeyOf(t, o.Ents[0]), in, Out{Present: true, Ent: o.Ents[0]})
+			add1("station/"+o.Val, in, Out{Present: true})
+			return n
 		}
+		if len(o.Ents) != 1 {
+			out.Violation(c, "%s: found without an entity", c.Op)
+			return -1
+		}
+		add1(ttapi.KeyOf(t, o.Ents[0]), in, Out{Present: true, Ent: o.Ents[0]})
 	case ttapi.IsJoin(info.Q):
 		tk := "travel/" + info.Key
-		u.touch(tk)
 		in := In{Kind: kJoinTrip, Table: "travel", Q: info.Q}
 		if o.Status == 0 {
 			if info.Q == "tripRoute" { // status 0 means the trip is absent
-				add(tk, in, Out{})
+				add1(tk, in, Out{})
 			}
-			return nil
+			// tripTrain answers 0 for an absent trip or an absent train: nothing to check
+			return n
 		}
 		if o.Val == "empty" {
-			add(tk, in, Out{Present: true, Empty: true})
-			return nil
+			add1(tk, in, Out{Present: true, Empty: true})
+			return n
 		}
 		if len(o.Ents) != 1 {
 			out.Violation(c, "%s: answered without an entity", c.Op)
-			return nil
+			return -1
 		}
 		rt := "route"
 		if info.Q == "tripTrain" {
 			rt = "train"
 		}
 		id := ttapi.StrField(o.Ents[0], "id")
-		add(tk, in, Out{Present: true, Val: id})
-		rk := rt + "/" + id
-		u.touch(rk)
-		add(rk, In{Kind: kJoinRef, Table: rt, Q: info.Q}, Out{Present: true, Ent: o.Ents[0]})
-	default:
-		return fmt.Errorf("%s %d: unknown query %q", c.Op, c.Index, info.Q)
+		add1(tk, in, Out{Present: true, Val: id})
+		add1(rt+"/"+id, In{Kind: kJoinRef, Table: rt, Q: info.Q}, Out{Present: true, Ent: o.Ents[0]})
 	}
-	return nil
+	return n
 }

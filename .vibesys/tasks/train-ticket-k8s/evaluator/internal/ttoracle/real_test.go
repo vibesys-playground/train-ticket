@@ -68,7 +68,8 @@ func loadCapture(t testing.TB, path string) (*ttoracle.Dataset, *check.History) 
 	}
 	var faults []check.Fault
 	for _, f := range rc.Faults {
-		faults = append(faults, check.Fault{Kind: f.Kind, Target: f.Target, Start: f.Start, End: f.End, AfterPhase: f.AfterPhase})
+		// The spike recorded the restarted service's table; the accuracy run names its Deployment.
+		faults = append(faults, check.Fault{Kind: f.Kind, Target: "ts-" + f.Target + "-service", Start: f.Start, End: f.End, AfterPhase: f.AfterPhase})
 	}
 	return &ttoracle.Dataset{Initial: rc.Dataset.Initial}, check.NewHistory(phases, faults)
 }
