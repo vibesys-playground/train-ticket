@@ -3,21 +3,21 @@
 Train Ticket's config, station, train, travel, route and price services on Kubernetes,
 measured by [vibesys-evaluator](https://github.com/uw-syfi/vibesys/tree/main/sdk/vibesys-evaluator):
 closed-loop throughput (`operations_per_second`) and open-loop p99 latency at 70% of it
-(`latency_ms.p99`) of a mixed stateful workload. What the candidate may change and the
-correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
+(`latency_ms.p99`) of a mixed stateful workload; and judged by an accuracy check, the
+evaluator's accuracy run with the task's model-based oracle. What the candidate may change and
+the correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 
 | File | What it is |
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives; the noise values are placeholders until a base is measured. |
-| `Dockerfile` | The task image: vibesys-evaluator from `sdk/vibesys-evaluator` (its Python package; loadgen, otelcapture and the core's `vibesys-evaluator` built from its Go module), kubectl, buildctl, the task's Go programs, and the interim check's servicebench. |
-| `sdk/vibesys-evaluator` | A copy of vibesys-evaluator's phase-runner branch (Go module and Python package, without tests) until it is released; then the Dockerfile pins the release (its wheel bundles the binaries) and `evaluator/go.mod` drops the `replace`. |
+| `Dockerfile` | The task image: vibesys-evaluator at the release `VIBESYS_EVALUATOR_VERSION` from PyPI (its wheel bundles loadgen, otelcapture and the core's `vibesys-evaluator`), kubectl, buildctl, and the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules. |
+| `accuracy.py` | The accuracy check (`python /task/accuracy.py accuracy --project-root ROOT`): the evaluator's accuracy run of bench.py's system with the accuracy workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
-| `evaluator/` | The Go module: `internal/ttdata` (fixture, entities, paths, admin JWT), `internal/ttworkload` (operations and model, on the Go SDK's `workload`), `cmd/generator` (`tt-generator`), `cmd/seed` (`tt-seed`). |
-| `check.py`, `accuracy/workload.toml` | The interim `[accuracy]` check (below). |
-| `tests/` | Python tests of bench.py, check.py, the manifest and the pins. |
+| `evaluator/` | The Go module (`go test ./...`): `internal/ttdata` (fixture, entities, paths, admin JWT), `internal/ttworkload` (the benchmark's operations and model, on the Go SDK's `workload`), `internal/ttapi` (the API both the accuracy workload and the oracle speak), `internal/ttcatalog` (the services' startup catalog), `internal/ttaccuracy` (the accuracy workload), `internal/ttoracle` (the oracle's model, on the Go SDK's `check`), `internal/ttfake` (an in-memory Train Ticket for the tests); `cmd/generator` (`tt-generator`), `cmd/seed` (`tt-seed`), `cmd/accuracy` (`tt-accuracy`), `cmd/oracle` (`tt-oracle`). |
+| `tests/` | Python tests of bench.py, accuracy.py, the manifest and the pins. |
 
 ## How a sample runs
 
@@ -45,12 +45,13 @@ generator starts from the fixture. The namespace is deleted on every exit path.
 `resources/evaluators/microservice/apps/trainticket` and `appsupport/trainticket`, deleted
 with servicebench): the same fixture grammar (`fuzz.go`, now on the evaluator's `Rand`, so
 the fixture is a function of `dataset.py`'s seed), the same operations and weights and the
-same update grammar. The benchmark only measures: servicebench's response validation
-(`validation.go`) is the accuracy check's (each request's info names its record and, for an
-update, the value written and the retired key). Things that changed with the framework:
+same update grammar. The benchmark only measures: whether the answers are right is the
+accuracy check's to judge (below). Things that changed with the framework:
 
-- servicebench held a lock per fixture record, so a read never overlapped an update of its
-  record. Here requests run freely, updates of one entity included.
+- servicebench, and the evaluator before its Go phase runner, held an exclusive key per
+  fixture record, so no two operations of one record overlapped. Here requests run freely,
+  updates of one entity included; this lowered the closed loop's throughput, which is the
+  application's own behavior (below, "No per-record lock").
 - Each phase's generator starts from the fixture, while the application keeps the earlier
   phases' updates: a read by a secondary key an earlier phase moved (a station's name, a
   route's direction, a price's route) may find nothing, which the services answer with
@@ -74,15 +75,100 @@ update, the value written and the retired key). Things that changed with the fra
   directory string, include the Dockerfile and the arguments in the tag's digest, and pass
   `--opt filename=...`, `--local dockerfile=...` and `--opt build-arg:K=V` to buildctl.
 
-## The accuracy oracle (`evaluator/cmd/oracle`, not wired yet)
+## No per-record lock (the closed loop's drop)
 
-The model-based replacement for the interim check: Train Ticket's semantics as plain Go over
-per-entity state (`evaluator/internal/ttoracle`), on vibesys-evaluator's `go/check` package
-(authoring guide: `sdk/vibesys-evaluator/docs/accuracy-checks.md`). `cmd/oracle` is
-`check.Main`: `oracle --history DIR [--out DIR]` re-checks a captured history offline and exits
-0 (PASS), 1 (FAIL) or 2 (UNKNOWN). `internal/ttapi` holds what the oracle and the future
-accuracy workload share: the operation `Info` the workload must emit, the HTTP request each
-operation maps to, strict entity schemas and the response parser.
+Without the exclusive key the closed loop does less: on vibesys-k8s, 4515 and 4889 ops/s in
+two closed loops (180 s and 10 s warmups) against 5348 and 5547 of the same schedule with the
+key, and `update_read_route` takes 259 ms (p50, second loop) where it took 83 once its key was
+free. The open loop at the earlier sample's 3744 ops/s did not change (p99 6.98 ms against 6.76
+to 7.50). Whether the key hid contention that the workload makes by updating only 32 routes
+(each about 9 times a second in the closed loop) decides the remedy, a wider pool of routes if
+so. It did not:
+
+- **No hot-key contention.** For each update, the latency of its write (step 1) against what
+  was in flight when it started: the requests of its service, and the writes of the same entity.
+  At equal load the same-entity writes change nothing, in every service. In the second closed
+  loop, route writes that started with 80 to 100 route requests in flight took 97.6, 98.9 and
+  97.2 ms (p50) with 0, 1 and 2 or more writes of their route in flight (1377, 1190 and 744
+  writes), and 109.6, 105.6 and 105.2 ms above 100 in flight (1968, 2061, 1719); the first loop
+  and the five other services likewise. (Bucketing by the writes that overlap an update over
+  its whole length instead makes slow updates look contended, because a longer update overlaps
+  more.) A route update is a `findById` and a `save` of one document, and MongoDB's
+  document-level concurrency makes overlapping saves of one document cheap.
+- **What the key did was admission control.** The route service is the bottleneck: its 2 CPUs
+  are saturated in the closed loop with or without the key. With 32 records the key admitted at
+  most 32 route updates into it and parked every other client that drew one outside the system
+  (104 ms, p50, in the second loop). Without it those clients are inside the route service: 115
+  route requests in flight on average (78 in updates) against 45 (26) with the key. Each request
+  takes longer (Little's law), and the service does less per CPU at that concurrency: 2.26 and
+  1.50 ms of route CPU per route request in the two loops against 1.59 and 1.19 with the key
+  (likely the JVM's 200 MB heap: every listing and route search loads the whole collection with
+  `findAll`, and two and a half times as many are in flight). That is how this application
+  behaves with 128 clients, and something a candidate can improve.
+- **A wider pool would not change it.** How many route requests are in flight is set by the
+  clients and the mix, not by which routes they name; with the key gone, more routes would only
+  grow the collection that every listing and route search reads.
+
+So the workload keeps its keys; the drop is part of the base's numbers when the baseline is
+measured again.
+
+## The accuracy check (`[accuracy]`)
+
+`accuracy.py` is the evaluator's accuracy run (vibesys-evaluator `docs/spec.md`, "Accuracy
+run"): it deploys and seeds the candidate exactly as the benchmark does (`bench.SYSTEM`), runs
+four open-loop phases of the accuracy workload (60 s each after a 5 s warmup, Poisson arrivals
+at 40 operations per second) with every request and response captured, restarts the services
+between phases (the fault schedule), deletes the namespace, and runs the oracle (`tt-oracle`)
+on the history. The exit status is the verdict's: 0 PASS, 1 FAIL, 2 UNKNOWN (also when the
+run could not complete); `$VIBESYS_ARTIFACTS_DIR/accuracy/` holds the report, the failures'
+timelines and the history, which `tt-oracle --history DIR` re-checks offline. It is its own
+script because an accuracy run's phase pods run the script's `phase` command, and so the
+script's workload, which is not the benchmark's.
+
+### The workload (`internal/ttaccuracy`)
+
+Thirty-four operations, one request each, of the six services' public API through the gateway
+with the admin token, each carrying the `ttapi.Info` the oracle reads back: creates, updates,
+deletes, route and price upserts (a few with server-generated ids), reads by key, the six
+listings, the secondary-key queries (station id by name, station name by id, routes between two
+stations, a price by route and train type, trips by route) and the two trip joins (a trip's
+route and train). About 46% writes and 12% listings. Each key is drawn from three pools per
+table: the seeded fixture (60%), the startup catalog (10%, which restarts write again), and
+eight ids of the check's own (30%, so that writes of one key follow each other closely and
+reads see them). The stream is generated ahead, independent of the answers.
+
+### The fault schedule
+
+Every service is restarted once, between phases, when no request is in flight:
+
+| After phase | Restarted |
+| --- | --- |
+| 0 | `ts-route-service`, `ts-price-service` |
+| 1 | `ts-station-service`, `ts-config-service` |
+| 2 | `ts-train-service`, `ts-travel-service` |
+
+This is what the oracle's `Fault` models: a restart of `ts-<table>-service` keeps every
+acknowledged write of its table and re-applies the service's startup catalog (create-if-absent
+for configs, stations, trains and trips; an overwrite for routes and prices), and touches no
+other table. Routes and prices go first, so the overwrite meets a phase's worth of changes to
+the catalog's routes and prices; trips last, after the routes and trains their joins read
+have been restarted. A fault the model does not describe is not scheduled: restarting a
+MongoDB (it has no volume, so its data would go), or a restart under load (a write in flight
+at the kill is lost or not, which the oracle could only call unknown).
+
+### The load
+
+Fixed, so that the history and the check's cost do not depend on the candidate's speed, and low,
+so that answers are judged rather than capacity: 40 operations per second, about 10400
+operations in all (the warmups are checked too). On the base at that rate no answer is lost, and at most 2 operations are in
+flight on one key, far below the checker's warning at 12 (measured below).
+
+### The oracle (`cmd/oracle`, `internal/ttoracle`)
+
+Train Ticket's semantics as plain Go over per-entity state, on vibesys-evaluator's `go/check`
+package (authoring guide: vibesys-evaluator `docs/accuracy-checks.md`). `cmd/oracle` is
+`check.Main`. `internal/ttapi` holds what the oracle and the workload share: the operation
+`Info`, the HTTP request each operation maps to, strict entity schemas and the response parser.
 
 - **Keys** are entities (`station/shanghai`, `route/<id>`, `travel/G1234`). A listing, a
   secondary-index query (route between two stations, trips by route, price by route and train,
@@ -98,47 +184,54 @@ operation maps to, strict entity schemas and the response parser.
 - **Statuses**: 2xx known; 5xx or a lost response unknown (the write may or may not have taken
   effect, within 10 s); any other status, a malformed body or a schema violation fails the check
   without a search.
-- **Dataset** (`dataset.json` in the history): `{"initial": {table: [entity]}, "reinit": ...}`,
-  both in the shape of `seed_catalog.json` (`initial`: what exists when the history starts,
-  the seed Job's fixture included; `reinit`: what a restart re-applies, default `initial`).
+- **What exists** (`ForFixture`): when the history starts, the startup catalog
+  (`internal/ttcatalog`, the base's InitData: 1 config, 13 stations, 6 trains, 10 routes,
+  10 prices, 5 trips) and the seeded fixture; a restart re-applies the catalog.
+- **Calls with nothing to check against** (an unknown read, a lost generated-id upsert no key
+  could come from, a query nothing could have matched) become pieces without keys: counted, an
+  unknown one toward the checker's 1% bound on lost answers, and not searched.
 
-Tests (`go test ./...` in `evaluator/`): synthetic concurrent histories of an in-memory fake
-(`internal/ttfake`) that the oracle accepts, with lost responses, with restart re-seeding; seven
-injected bugs and two proxy mutants (stale reads, a dropped field) that it fails; hand-written
-racy-create and dangling-join histories; and `testdata/real-capture.json.gz`, a history recorded
-against the real services on kind (6 clients, 3 phases, two rolling restarts), checked offline.
+Tests (`go test ./...` in `evaluator/`): the accuracy workload against the in-memory fake
+(`internal/ttfake`, seeded with the catalog and the fixture, re-seeding the catalog on restart)
+with the fault schedule between phases, which the oracle accepts, and with five injected bugs
+(a lost update, a stale secondary index, a delete that a restart undoes, a wrong schema field, a
+listing that drops its last element), which it fails; the generator binary under capture;
+synthetic concurrent histories with lost responses and restarts; seven injected bugs and two
+proxy mutants; hand-written racy-create, racy-delete and dangling-join histories; and
+`testdata/real-capture.json.gz`, a history recorded against the real services on kind (6
+clients, 3 phases, two rolling restarts), checked offline.
 
-What the accuracy command will look like once the evaluator's accuracy flow exists (it deploys,
-seeds, runs the phases at a fixed open-loop rate with the restarts between them, and captures
-the history): `[accuracy] command = ["tt-oracle", "--history", "${HISTORY_DIR}"]` with the task
-image building `tt-oracle` from `evaluator/cmd/oracle`. Nothing in this directory calls it yet:
-`check.py` stays the `[accuracy]` command until then, and the accuracy workload (which must
-emit `ttapi.Info` as the operations' info, one step per operation) is written with the flow.
+### Measured (base and two broken candidates)
 
-## The interim check (`[accuracy]`)
+On vibesys-k8s-2 (a shared kind cluster), one run each (each run draws its own seed):
 
-The task's own correctness check is still to be designed. Until then, `check.py` deploys the
-candidate exactly as the benchmark does and, in place of the benchmark's seed, runs
-servicebench's Train Ticket accuracy suite (`servicebench --mode accuracy`, built in the task
-image from `ORACLE_VIBESYS_COMMIT`, the last vibesys commit with servicebench) in the seed
-Job against the gateway; no load phase runs. It checks the startup catalog, exact schemas, a
-randomized create/read/update/delete graph, read your write, deletes and stale secondary
-indexes (no crash recovery: the suite's restart hook is not wired). Exit 0 means the suite
-passed. On the cluster, against the base, it passed in 2.2 minutes (the suite 46 s in the seed
-Job: 34570 checks, 32 random cases).
+| Candidate | Verdict | Wall time | Calls (lost) | Pieces | Keys | Most in flight on a key | Check |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| The base | PASS | 7.2 min | 10332 (0) | 94119 | 407 | 2 | 2.2 s |
+| Trains cached by id, updates not invalidating | FAIL: 34 train keys (a read after an update shows the old train) | 7.2 min | 10207 (0) | 93323 | 392 | 2 | 2.0 s |
+| Config updates kept in memory only | FAIL: 15 config keys (after the config restart a listing shows the value before the update) | 7.3 min | 10314 (0) | 89722 | 390 | 2 | 2.6 s |
+
+Every phase answered every request with a 2xx (about 2580 calls a phase: 7% creates, 12% deletes,
+19% updates, 7% upserts, 20% reads by key, 11% listings, 23% queries and joins). The faults
+are exercised: before its service's restart the workload changed catalog entities of every
+table (on the base, 7 deletes and 19 upserts of catalog routes before the route restart, 10
+deletes and 21 updates of catalog configs before the config restart, and so on), and the
+listings, reads and queries after it see what the restart re-seeded. The restarts took 15 to
+17 s each, and a run about 7 minutes: about 1 to deploy and seed, 4.3 of load, 1.6 of restarts,
+seconds to check.
 
 ## Resources
 
 Requests equal limits. The application: 6 services x (2 CPU, 1 GiB), 6 MongoDB x (1 CPU,
 1 GiB), the gateway (2 CPU, 256 MiB): 20 CPUs and about 12.3 GiB. Each phase pod adds the
 package's 6 CPUs and 4 GiB, the seed pod 4 CPUs and 2 GiB (not at the same time): about 26
-CPUs and 16.3 GiB at peak. One sample takes about 22 minutes (the images build in about a
-minute with warm caches): every phase pod receives the sample's whole write history, and the
-first warmup's 336 thousand writes (235 MB) make each later 40 s phase take about 3 minutes.
+CPUs and 16.3 GiB at peak. A benchmark sample takes about 8 minutes, an accuracy check about
+7 (the images build in about a minute with warm caches).
 
 ## Measured (base)
 
-On the shared kind cluster (one 32-CPU node, sharing the host with other jobs), every phase of
+To be measured again on the released evaluator (the numbers below are the earlier runner's,
+with the per-record key; "No per-record lock" has the difference). On the shared kind cluster (one 32-CPU node, sharing the host with other jobs), every phase of
 both samples valid (0 errors, 0 failed checks), seeded (224 entities, 448 requests) in 8 s:
 
 | Sample | First warmup | Closed loops (ops/s) | Open loops (rate, p99 ms) | Result | Time |
@@ -152,7 +245,7 @@ faster (p50 94 ms to 20 ms); the other services used 1 to 1.5 CPUs and each Mong
 After 180 s it no longer climbs within a window (5200 to 6200 ops/s in 5 s buckets of the
 second trial); the third trial's dip (3900 to 5700 ops/s, every service slower and the route
 service below its limit) came with a host load average of 85 on 64 CPUs from jobs outside the
-cluster. In the closed loop route updates also wait for their route's exclusive key (32 routes,
+cluster. In the closed loop route updates also waited for their route's exclusive key (32 routes,
 about 66 ms per update), which is what the closed loop's p99 (230 to 780 ms) shows; the open
 loop's p99 is the objective.
 
@@ -174,15 +267,21 @@ docker run --rm --network host --user "$(id -u):$(id -g)" \
   --vs-output /vibesys/artifacts/records.jsonl
 ```
 
+The accuracy check is the same `docker run` with `python /task/accuracy.py accuracy
+--project-root "$PWD"`; `tt-oracle --history /tmp/tt-artifacts/accuracy/history` (in the task
+image) re-checks its history.
+
 ## Tests
 
 ```bash
 (cd .vibesys/tasks/train-ticket-k8s/evaluator && go test ./...)
-python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs sdk/vibesys-evaluator/python installed, pyyaml, pytest
+python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator, pyyaml, pytest
 ```
 
 The Go tests cover the fixture (pinned by `dataset.py`'s digest), the admin token, request
 building, the update grammar, the generator's stream (deterministic, in the mix's
-proportions, bodies kept only under capture) and the seed against a fake API. The Python tests build bench.py's and check.py's objects, render
-the manifest with the package's renderer, drive `benchmark(run)` with a fake run, and check
-that the Dockerfile and `evaluator/go.mod` take vibesys-evaluator from the one copy.
+proportions, bodies kept only under capture), the seed against a fake API, the manifest
+rendered by the Go SDK's renderer, and the accuracy check (above). The Python tests build
+bench.py's and accuracy.py's objects, drive `benchmark(run)` with a fake run, check the
+`[accuracy]` command, and check that the Dockerfile and `evaluator/go.mod` pin the same
+vibesys-evaluator release.
