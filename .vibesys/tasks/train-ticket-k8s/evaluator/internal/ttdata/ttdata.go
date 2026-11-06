@@ -22,7 +22,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/workload"
+	"github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/workload"
 )
 
 // The six services of the task, in the order the fixture creates their entities' owners.

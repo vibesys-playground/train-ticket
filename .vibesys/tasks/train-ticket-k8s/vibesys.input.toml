@@ -12,10 +12,12 @@ needs = ["kubernetes"]
 # deploys and tears down the application itself (vibesys_evaluator.microservices.k8s.App), so
 # it has no [candidate] server.
 #
-# The check is interim: check.py runs servicebench's Train Ticket accuracy suite against the
-# deployed candidate (README.md). The benchmark is bench.py, one sample per run.
+# Both are bench.py. The accuracy check is vibesys-evaluator's accuracy run (four open-loop
+# phases at 40 operations per second with every service restarted once between them, the
+# history captured), judged by the task's oracle (tt-oracle); exit 0 PASS, 1 FAIL, 2 UNKNOWN.
+# The benchmark is one sample per run. README.md has both.
 [accuracy]
-command = ["python", "/task/check.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
+command = ["python", "/task/bench.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
 timeout_seconds = 2400
 
 [benchmark]

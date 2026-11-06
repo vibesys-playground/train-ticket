@@ -16,7 +16,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/loadgen/gen/vibesys/evaluator/v1"
+	pb "github.com/uw-syfi/vibesys/sdk/vibesys-evaluator/go/gen/vibesys/evaluator/v1"
 
 	"vibesys/train-ticket-k8s-evaluator/internal/ttdata"
 )
@@ -129,8 +129,8 @@ func path(step *pb.Step) string {
 }
 
 // TestTheStreamIsTheWorkload: the generator writes, for one phase, the same stream every time
-// (and another for another sample), in the mix's proportions, every request authorized, every
-// update holding its entity's exclusive key and keeping its bodies for the check.
+// (and another for another sample), in the mix's proportions, every request authorized; a
+// benchmark's phase keeps no bodies, and one under capture keeps every operation's.
 func TestTheStreamIsTheWorkload(t *testing.T) {
 	const n = 20000
 	dataset := datasetFile(t)
@@ -161,8 +161,8 @@ func TestTheStreamIsTheWorkload(t *testing.T) {
 		case !update && len(steps) != 1:
 			t.Fatalf("operation %d (%s): %d steps", i, name, len(steps))
 		}
-		if update != (op.GetExclusiveKey() != "") || (update && !op.GetKeepBodies()) {
-			t.Fatalf("operation %d (%s): exclusive %q, keep bodies %v", i, name, op.GetExclusiveKey(), op.GetKeepBodies())
+		if op.GetKeepBodies() {
+			t.Fatalf("operation %d (%s) keeps its bodies in a benchmark's phase", i, name)
 		}
 		service := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(name, "update_read_"), "list_"), "read_")
 		for _, step := range steps {
@@ -187,6 +187,14 @@ func TestTheStreamIsTheWorkload(t *testing.T) {
 		share, want := float64(counts[kind])/n, weight/95
 		if share < want*0.95 || share > want*1.05 {
 			t.Errorf("%s: %.4f of the stream, want %.4f", kind, share, want)
+		}
+	}
+	captured := proto.Clone(input).(*pb.PhaseInput)
+	captured.Capture = true
+	_, kept, _ := generate(t, captured, dataset, 100)
+	for i, op := range kept {
+		if !op.GetKeepBodies() || op.GetOperation() != ops[i].GetOperation() || len(op.GetSteps()) != len(ops[i].GetSteps()) {
+			t.Fatalf("operation %d under capture: keep bodies %v, operation %d, want %d", i, op.GetKeepBodies(), op.GetOperation(), ops[i].GetOperation())
 		}
 	}
 }

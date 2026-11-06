@@ -53,7 +53,7 @@ The task owns everything else, and a candidate cannot change it:
   `ts-gateway:8080`) that routes `/api/v1/<name>service` to `ts-<name>-service`; replica
   counts, resources, commands;
 - the fixture, the load generator, the workloads, the open loop's offered rate, and the
-  checks.
+  accuracy check.
 
 Resources are fixed (requests = limits). Every service pod gets 2 CPUs and 1 GiB; every
 MongoDB 1 CPU and 1 GiB; the gateway 2 CPUs. You cannot add replicas or CPU; a gain must come
@@ -77,28 +77,44 @@ creates its fixture through the API.
 
 ## Correctness bar
 
-The benchmark checks the responses of its own operations, all writes and 10% of reads,
-against a model of the fixture and every update the sample sent:
+The benchmark only measures; the task's accuracy check judges the answers (README.md, "The
+accuracy check"). It deploys the candidate as the benchmark does, sends a mixed workload at a
+low fixed rate (creates, updates, deletes, upserts, reads by key, listings, secondary-key
+queries and the trip joins, over the services' startup catalog, the fixture and ids of its
+own), restarts every service once between its phases, and checks every answer against a model
+of Train Ticket's six services as the base implements them:
 
 1. Exact contract: every response is the services' envelope `{status, msg, data}` with
    exactly those fields; an entity has exactly its service's fields with their types
-   (lists check every element); keys are unique in a list.
+   (lists check every element); keys are unique in a list. A response's HTTP status is 2xx.
 2. Exact data: a read or list shows the entity's value exactly as written (strings,
    numbers, epoch-millisecond times, station and distance arrays in order).
-3. Visibility: an update acknowledged before a read starts is visible to it (no bound);
-   a read concurrent with an update may show the old or the new value. A read of the
-   entity just updated, in the same operation, shows the new value.
+3. One order per entity: the answers about each entity are explained by one order of the
+   operations on it that respects real time (an operation that completed before another
+   started comes first), with each operation's application status (`status` 1 or 0) the
+   base's for the entity's state at that point: a create of an existing entity, an update or
+   delete of a missing one, and so on. Operations that overlap may be ordered either way. A
+   listing, a secondary-key query and a trip join are judged entity by entity (a listing need
+   not be a snapshot of the whole collection).
 4. Secondary keys: after an update moves a secondary key (a station's name, a route's
-   direction, a price's route), a lookup by the retired key finds nothing (application
-   status 0), and a lookup by the new key finds the entity.
+   stations, a price's route), a lookup by the retired key no longer finds the entity, and a
+   lookup by the new key does.
+5. Restarts: a restarted service keeps every acknowledged write. On start it writes its
+   startup catalog (the stations, trains, trips, routes, prices and configs of Train Ticket
+   v0.2.0) as the base does: what is missing is created, and routes and prices are written
+   over.
+6. Lost answers: a 5xx or a request with no answer counts as an operation that may or may not
+   have taken effect; if more than 1% of what the check judges has such an unknown outcome,
+   the check fails (at its low fixed rate, losing answers is the candidate's doing).
 
-A failed check or a request error in a measurement window fails the sample, as does an
-operation of the mix that never completed or an open loop that cannot offer 95% of its
-rate.
+The base's services find, then act, without a transaction, so two overlapping writes of one
+entity can both succeed where one order would refuse one of them (two creates, two deletes,
+an update that saves back an entity an overlapping delete removed). The check accepts these
+outcomes while the writes overlap; a candidate need not produce them.
 
-The task's `[accuracy]` check is interim (README.md): it runs servicebench's Train Ticket
-accuracy suite against the deployed candidate (startup catalog, schemas, a randomized
-create/read/update/delete graph, deletes, stale secondary indexes).
+In the benchmark, a request error (a response other than the step's expected HTTP status, or
+none) in a measurement window fails the sample, as does an operation of the mix that never
+completed or an open loop that cannot offer 95% of its rate.
 
 ## Rules
 
