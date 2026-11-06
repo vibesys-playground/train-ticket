@@ -1,0 +1,24 @@
+version = "0.2"
+
+[agent]
+domain = "microservices"
+
+[environment]
+needs = ["kubernetes"]
+
+# Both commands run the trusted task code baked into the task image at /task; they read
+# KUBECONFIG, VIBESYS_K8S_REGISTRY and VIBESYS_K8S_BUILDER from the environment and build the
+# candidate's image (the repository root's Dockerfile) in the cluster's builder. The task
+# deploys and tears down the application itself (vibesys_evaluator.microservices.k8s.App), so
+# it has no [candidate] server.
+#
+# The check is interim: check.py runs servicebench's Train Ticket accuracy suite against the
+# deployed candidate (README.md). The benchmark is bench.py, one sample per run.
+[accuracy]
+command = ["python", "/task/check.py", "accuracy", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 2400
+
+[benchmark]
+command = ["python", "/task/bench.py", "benchmark", "--project-root", "${PROJECT_ROOT}"]
+timeout_seconds = 3600
+result_protocol = 2

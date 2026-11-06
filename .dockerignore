@@ -1,0 +1,11 @@
+.git
+.vibesys
+.github
+old-docs
+deployment
+image
+jenkins-ci
+hack
+script
+**/target
+**/*.iml

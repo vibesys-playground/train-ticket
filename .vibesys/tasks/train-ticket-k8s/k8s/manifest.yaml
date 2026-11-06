@@ -1,0 +1,641 @@
+# The train-ticket-k8s topology: the six Train Ticket services the workload exercises, each
+# with its own MongoDB, behind the task's gateway. The task owns this file; the candidate owns
+# the image every service runs (${TRAIN_TICKET_IMAGE}, built from the repository root's
+# Dockerfile), which must start each service with `command: [<service>]`.
+#
+# Resources are fixed (requests = limits): each service 2 CPUs and 1 GiB, each MongoDB 1 CPU
+# and 1 GiB, the gateway 2 CPUs and 256 MiB. ${NAMESPACE} is the sample's fresh namespace.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ts-gateway-config
+data:
+  nginx.conf: |
+    # The gateway: the services' public paths, as Train Ticket's own UI proxy routes them
+    # (ts-ui-dashboard/nginx.conf), with keep-alive connections to every service.
+    worker_processes 2;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+    events {
+      worker_connections 8192;
+    }
+    http {
+      access_log off;
+      keepalive_requests 1000000;
+      keepalive_timeout 120s;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header Host $host;
+      proxy_buffering on;
+      client_body_temp_path /tmp/client_body;
+      proxy_temp_path /tmp/proxy;
+      fastcgi_temp_path /tmp/fastcgi;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      upstream config {
+        server ts-config-service:15679;
+        keepalive 256;
+      }
+      upstream station {
+        server ts-station-service:12345;
+        keepalive 256;
+      }
+      upstream train {
+        server ts-train-service:14567;
+        keepalive 256;
+      }
+      upstream travel {
+        server ts-travel-service:12346;
+        keepalive 256;
+      }
+      upstream route {
+        server ts-route-service:11178;
+        keepalive 256;
+      }
+      upstream price {
+        server ts-price-service:16579;
+        keepalive 256;
+      }
+      server {
+        listen 8080 reuseport backlog=4096;
+        location = /healthz {
+          return 200 "ok\n";
+        }
+        location /api/v1/configservice {
+          proxy_pass http://config;
+        }
+        location /api/v1/stationservice {
+          proxy_pass http://station;
+        }
+        location /api/v1/trainservice {
+          proxy_pass http://train;
+        }
+        location /api/v1/travelservice {
+          proxy_pass http://travel;
+        }
+        location /api/v1/routeservice {
+          proxy_pass http://route;
+        }
+        location /api/v1/priceservice {
+          proxy_pass http://price;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-gateway
+  labels:
+    app: ts-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-gateway
+  template:
+    metadata:
+      labels:
+        app: ts-gateway
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+        ports:
+        - containerPort: 8080
+        resources:
+          requests: {cpu: "2", memory: 256Mi}
+          limits: {cpu: "2", memory: 256Mi}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          periodSeconds: 2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      volumes:
+      - name: config
+        configMap:
+          name: ts-gateway-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-gateway
+spec:
+  selector:
+    app: ts-gateway
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-config-mongo
+  labels:
+    app: ts-config-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-config-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-config-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-config-mongo
+spec:
+  selector:
+    app: ts-config-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-station-mongo
+  labels:
+    app: ts-station-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-station-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-station-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-station-mongo
+spec:
+  selector:
+    app: ts-station-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-train-mongo
+  labels:
+    app: ts-train-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-train-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-train-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-train-mongo
+spec:
+  selector:
+    app: ts-train-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-travel-mongo
+  labels:
+    app: ts-travel-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-travel-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-travel-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-travel-mongo
+spec:
+  selector:
+    app: ts-travel-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-route-mongo
+  labels:
+    app: ts-route-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-route-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-route-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-route-mongo
+spec:
+  selector:
+    app: ts-route-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-price-mongo
+  labels:
+    app: ts-price-mongo
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-price-mongo
+  template:
+    metadata:
+      labels:
+        app: ts-price-mongo
+        tier: data
+    spec:
+      containers:
+      - name: mongo
+        image: mongo:3.4@sha256:d314f7eca9d3f825d091b77c40d2f3c9d6fff4de88dde2962527353476f107ba
+        ports:
+        - containerPort: 27017
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {cpu: "1", memory: 1Gi}
+        readinessProbe:
+          tcpSocket: {port: 27017}
+          periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-price-mongo
+spec:
+  selector:
+    app: ts-price-mongo
+  ports:
+  - port: 27017
+    targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-config-service
+  labels:
+    app: ts-config-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-config-service
+  template:
+    metadata:
+      labels:
+        app: ts-config-service
+    spec:
+      containers:
+      - name: ts-config-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-config-service]
+        ports:
+        - containerPort: 15679
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/configservice/welcome, port: 15679}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-config-service
+spec:
+  selector:
+    app: ts-config-service
+  ports:
+  - port: 15679
+    targetPort: 15679
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-station-service
+  labels:
+    app: ts-station-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-station-service
+  template:
+    metadata:
+      labels:
+        app: ts-station-service
+    spec:
+      containers:
+      - name: ts-station-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-station-service]
+        ports:
+        - containerPort: 12345
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/stationservice/welcome, port: 12345}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-station-service
+spec:
+  selector:
+    app: ts-station-service
+  ports:
+  - port: 12345
+    targetPort: 12345
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-train-service
+  labels:
+    app: ts-train-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-train-service
+  template:
+    metadata:
+      labels:
+        app: ts-train-service
+    spec:
+      containers:
+      - name: ts-train-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-train-service]
+        ports:
+        - containerPort: 14567
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/trainservice/trains/welcome, port: 14567}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-train-service
+spec:
+  selector:
+    app: ts-train-service
+  ports:
+  - port: 14567
+    targetPort: 14567
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-travel-service
+  labels:
+    app: ts-travel-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-travel-service
+  template:
+    metadata:
+      labels:
+        app: ts-travel-service
+    spec:
+      containers:
+      - name: ts-travel-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-travel-service]
+        ports:
+        - containerPort: 12346
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/travelservice/welcome, port: 12346}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-travel-service
+spec:
+  selector:
+    app: ts-travel-service
+  ports:
+  - port: 12346
+    targetPort: 12346
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-route-service
+  labels:
+    app: ts-route-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-route-service
+  template:
+    metadata:
+      labels:
+        app: ts-route-service
+    spec:
+      containers:
+      - name: ts-route-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-route-service]
+        ports:
+        - containerPort: 11178
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/routeservice/welcome, port: 11178}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-route-service
+spec:
+  selector:
+    app: ts-route-service
+  ports:
+  - port: 11178
+    targetPort: 11178
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-price-service
+  labels:
+    app: ts-price-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ts-price-service
+  template:
+    metadata:
+      labels:
+        app: ts-price-service
+    spec:
+      containers:
+      - name: ts-price-service
+        image: ${TRAIN_TICKET_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: [ts-price-service]
+        ports:
+        - containerPort: 16579
+        resources:
+          requests: {cpu: "2", memory: 1Gi}
+          limits: {cpu: "2", memory: 1Gi}
+        readinessProbe:
+          httpGet: {path: /api/v1/priceservice/prices/welcome, port: 16579}
+          initialDelaySeconds: 10
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-price-service
+spec:
+  selector:
+    app: ts-price-service
+  ports:
+  - port: 16579
+    targetPort: 16579
