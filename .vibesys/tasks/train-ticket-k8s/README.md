@@ -87,7 +87,8 @@ image from `ORACLE_VIBESYS_COMMIT`, the last vibesys commit with servicebench) i
 Job against the gateway; no load phase runs. It checks the startup catalog, exact schemas, a
 randomized create/read/update/delete graph, read your write, deletes and stale secondary
 indexes (no crash recovery: the suite's restart hook is not wired). Exit 0 means the suite
-passed.
+passed. On the cluster, against the base, it passed in 2.2 minutes (the suite 46 s in the seed
+Job: 34570 checks, 32 random cases).
 
 ## Resources
 
