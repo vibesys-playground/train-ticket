@@ -1,4 +1,4 @@
-"""bench.py and accuracy.py build their objects, and the manifest is one the package deploys.
+"""bench.py builds its objects, and the manifest is one the package deploys.
 
 Run with vibesys-evaluator installed at the task's pin (README.md, "Tests"):
 
@@ -8,7 +8,6 @@ Run with vibesys-evaluator installed at the task's pin (README.md, "Tests"):
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import json
 import re
 import subprocess
@@ -153,26 +152,24 @@ def test_seed_runs_the_go_seed_and_checks_its_digest(monkeypatch):
 
 
 def test_the_accuracy_check_runs_its_workload_and_oracle_at_a_fixed_low_load():
-    accuracy = importlib.import_module("accuracy")
-    assert isinstance(accuracy.WORKLOAD, ms.Generator)
-    assert list(accuracy.WORKLOAD.command) == ["tt-accuracy"]
-    check = accuracy.ACCURACY
+    check = bench.ACCURACY
     assert isinstance(check, ms.Accuracy)
+    # its own workload, a constant (the phase pods rebuild the task without the orchestrator's
+    # environment), not the benchmark's
+    assert isinstance(check.workload, ms.Generator) and check.workload is not bench.WORKLOAD
+    assert list(check.workload.command) == ["tt-accuracy"]
     assert list(check.oracle) == ["tt-oracle"]
-    assert (check.phases, check.rate, check.secs, check.warmup) == (4, 40, 60, 5)
+    assert (check.phases, check.rate, check.secs, check.warmup, check.arrivals) == (4, 40, 60, 5, "poisson")
     # every service restarted once, between phases, each a Deployment the App lets it restart
     assert sorted(f.deployment for f in check.faults) == sorted(SERVICES)
     assert all(f.action == "restart" and 0 <= f.after < check.phases - 1 for f in check.faults)
     assert set(f.deployment for f in check.faults) <= set(bench.SYSTEM.restartable)
-    with pytest.raises(RuntimeError, match="bench.py is the benchmark"):
-        accuracy.no_benchmark(None)
 
 
 def test_the_oracle_models_the_faults_the_check_runs():
     # the oracle maps a restart's Deployment to its table (ttoracle.ServiceTable): ts-<table>-service
-    accuracy = importlib.import_module("accuracy")
     tables = {"config", "station", "train", "route", "price", "travel"}
-    for fault in accuracy.ACCURACY.faults:
+    for fault in bench.ACCURACY.faults:
         assert re.fullmatch(r"ts-(\w+)-service", fault.deployment).group(1) in tables
 
 
@@ -184,7 +181,7 @@ def test_the_task_manifest_is_schema_0_2_without_a_candidate_server():
     assert manifest["benchmark"]["command"][:3] == ["python", "/task/bench.py", "benchmark"]
     assert manifest["benchmark"]["result_protocol"] == 2
     assert manifest["accuracy"]["command"] == [
-        "python", "/task/accuracy.py", "accuracy", "--project-root", "${PROJECT_ROOT}"
+        "python", "/task/bench.py", "accuracy", "--project-root", "${PROJECT_ROOT}"
     ]
     objectives = tomllib.loads((TASK / "objectives.toml").read_text())
     assert [o["name"] for o in objectives["objective"]] == list(bench.METRICS)

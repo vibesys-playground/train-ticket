@@ -151,7 +151,7 @@ func catalog(t testing.TB) map[string]string {
 	return out
 }
 
-// faults is the accuracy check's schedule (accuracy.py): after phase i, restart these services.
+// faults is the accuracy check's schedule (bench.py's FAULTS): after phase i, restart these services.
 var faults = [][]string{{"route", "price"}, {"station", "config"}, {"train", "travel"}}
 
 // record runs the workload against the fake with clients concurrent clients per phase, and the

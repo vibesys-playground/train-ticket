@@ -1,6 +1,6 @@
 // Package ttaccuracy is the train-ticket-k8s accuracy check's workload, on the vibesys-evaluator
 // Go SDK: the requests whose answers the oracle (internal/ttoracle) judges. cmd/accuracy runs it
-// as the generator of the accuracy run's phases (tt-accuracy; accuracy.py names it).
+// as the generator of the accuracy run's phases (tt-accuracy; bench.py's accuracy check names it).
 //
 // Every operation is one request of the six services' public API, through the gateway, with the
 // admin token; its Info is the ttapi.Info the oracle reads back, and its name Info.OpName(). The

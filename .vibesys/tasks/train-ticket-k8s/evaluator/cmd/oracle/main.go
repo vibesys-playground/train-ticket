@@ -2,7 +2,7 @@
 // captured history of the accuracy workload (internal/ttaccuracy) against Train Ticket's
 // semantics (internal/ttoracle), on vibesys-evaluator's checker (go/check).
 //
-// accuracy.py's accuracy check runs it on the history the accuracy run wrote:
+// bench.py's accuracy check runs it on the history the accuracy run wrote:
 //
 //	tt-oracle --history DIR --out DIR
 //

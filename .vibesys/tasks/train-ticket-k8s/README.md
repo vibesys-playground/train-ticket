@@ -11,13 +11,12 @@ the correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives; the noise values are placeholders until a base is measured. |
-| `Dockerfile` | The task image: vibesys-evaluator at the release `VIBESYS_EVALUATOR_VERSION` from PyPI (its wheel bundles loadgen, otelcapture and the core's `vibesys-evaluator`), kubectl, buildctl, and the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
-| `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules. |
-| `accuracy.py` | The accuracy check (`python /task/accuracy.py accuracy --project-root ROOT`): the evaluator's accuracy run of bench.py's system with the accuracy workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
+| `Dockerfile` | The task image: vibesys-evaluator's microservices image at the release 0.3.0rc2, by tag and digest (the PyPI package with its bundled loadgen, otelcapture and core `vibesys-evaluator`, kubectl, buildctl), plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
+| `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules; and the accuracy check (`python /task/bench.py accuracy --project-root ROOT`): the evaluator's accuracy run of the same system with its own workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
 | `evaluator/` | The Go module (`go test ./...`): `internal/ttdata` (fixture, entities, paths, admin JWT), `internal/ttworkload` (the benchmark's operations and model, on the Go SDK's `workload`), `internal/ttapi` (the API both the accuracy workload and the oracle speak), `internal/ttcatalog` (the services' startup catalog), `internal/ttaccuracy` (the accuracy workload), `internal/ttoracle` (the oracle's model, on the Go SDK's `check`), `internal/ttfake` (an in-memory Train Ticket for the tests); `cmd/generator` (`tt-generator`), `cmd/seed` (`tt-seed`), `cmd/accuracy` (`tt-accuracy`), `cmd/oracle` (`tt-oracle`). |
-| `tests/` | Python tests of bench.py, accuracy.py, the manifest and the pins. |
+| `tests/` | Python tests of bench.py (the benchmark and the accuracy check), the manifest and the pins. |
 
 ## How a sample runs
 
@@ -114,16 +113,16 @@ measured again.
 
 ## The accuracy check (`[accuracy]`)
 
-`accuracy.py` is the evaluator's accuracy run (vibesys-evaluator `docs/spec.md`, "Accuracy
-run"): it deploys and seeds the candidate exactly as the benchmark does (`bench.SYSTEM`), runs
+`bench.py accuracy` is the evaluator's accuracy run (vibesys-evaluator `docs/spec.md`,
+"Accuracy run"): it deploys and seeds the candidate exactly as the benchmark does (`bench.SYSTEM`), runs
 four open-loop phases of the accuracy workload (60 s each after a 5 s warmup, Poisson arrivals
 at 40 operations per second) with every request and response captured, restarts the services
 between phases (the fault schedule), deletes the namespace, and runs the oracle (`tt-oracle`)
 on the history. The exit status is the verdict's: 0 PASS, 1 FAIL, 2 UNKNOWN (also when the
 run could not complete); `$VIBESYS_ARTIFACTS_DIR/accuracy/` holds the report, the failures'
-timelines and the history, which `tt-oracle --history DIR` re-checks offline. It is its own
-script because an accuracy run's phase pods run the script's `phase` command, and so the
-script's workload, which is not the benchmark's.
+timelines and the history, which `tt-oracle --history DIR` re-checks offline. The check
+carries its own workload (`ms.Accuracy(workload=...)`), not the benchmark's; it is a constant
+of bench.py, because the phase pods rebuild the task without the orchestrator's environment.
 
 ### The workload (`internal/ttaccuracy`)
 
@@ -267,7 +266,13 @@ docker run --rm --network host --user "$(id -u):$(id -g)" \
   --vs-output /vibesys/artifacts/records.jsonl
 ```
 
-The accuracy check is the same `docker run` with `python /task/accuracy.py accuracy
+While vibesys-evaluator's images are private (until its release makes them public), the base
+image needs ghcr.io credentials twice: `docker login ghcr.io` for the `docker build`, and, for
+the in-cluster build of the task image, a docker config with the ghcr.io auth in the task
+container (`-v ghcr-config.json:/tmp/.docker/config.json:ro`: buildctl reads
+`$HOME/.docker/config.json`, and `HOME` is `/tmp`).
+
+The accuracy check is the same `docker run` with `python /task/bench.py accuracy
 --project-root "$PWD"`; `tt-oracle --history /tmp/tt-artifacts/accuracy/history` (in the task
 image) re-checks its history.
 
@@ -275,13 +280,13 @@ image) re-checks its history.
 
 ```bash
 (cd .vibesys/tasks/train-ticket-k8s/evaluator && go test ./...)
-python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator, pyyaml, pytest
+python -m pytest .vibesys/tasks/train-ticket-k8s/tests   # needs vibesys-evaluator==0.3.0rc2, pyyaml, pytest
 ```
 
 The Go tests cover the fixture (pinned by `dataset.py`'s digest), the admin token, request
 building, the update grammar, the generator's stream (deterministic, in the mix's
 proportions, bodies kept only under capture), the seed against a fake API, the manifest
 rendered by the Go SDK's renderer, and the accuracy check (above). The Python tests build
-bench.py's and accuracy.py's objects, drive `benchmark(run)` with a fake run, check the
-`[accuracy]` command, and check that the Dockerfile and `evaluator/go.mod` pin the same
-vibesys-evaluator release.
+bench.py's objects (the benchmark's and the accuracy check's), drive `benchmark(run)` with a
+fake run, check the `[accuracy]` command, and check that the Dockerfile's base image and
+`evaluator/go.mod` pin the same vibesys-evaluator release.

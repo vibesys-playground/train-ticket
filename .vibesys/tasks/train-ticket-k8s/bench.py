@@ -1,14 +1,16 @@
-"""train-ticket-k8s benchmark: Train Ticket's six core services on Kubernetes, on vibesys-evaluator.
+"""train-ticket-k8s benchmark and accuracy check: Train Ticket's six core services on Kubernetes.
 
     python /task/bench.py benchmark --project-root ROOT --vs-output PATH   (one sample)
+    python /task/bench.py accuracy --project-root ROOT                     (the [accuracy] check)
 
-The five parts: (1) the system under test, (2) the initial data (seed),
-(3) the workload, (4) the benchmark function, (5) the validity rules. The
-data is dataset.py's fixture, created through the public API by the Go seed
-(evaluator/cmd/seed). The workload (operations, request distributions and the
-model the updates change) is the Go generator of evaluator/cmd/generator; this
-script only orchestrates. The benchmark only measures: whether the responses
-are right is the accuracy check's to judge.
+On vibesys-evaluator. The five parts: (1) the system under test, (2) the
+initial data (seed), (3) the workload, (4) the benchmark function, (5) the
+validity rules; and (6) the accuracy check. The data is dataset.py's fixture,
+created through the public API by the Go seed (evaluator/cmd/seed). The
+benchmark's workload (operations, request distributions and the model the
+updates change) is the Go generator of evaluator/cmd/generator; this script
+only orchestrates. The benchmark only measures: whether the responses are
+right is the accuracy check's to judge, with its own workload and oracle.
 """
 
 from __future__ import annotations
@@ -160,6 +162,51 @@ METRICS = {
 VALIDITY = vse.Validity(max_error_rate=0.0, min_sustained_ratio=0.95, min_ops_per_operation=1)
 
 
+# ------------------------------------------------------- (6) accuracy check
+# vibesys-evaluator's accuracy run (its spec, "Accuracy run"): it deploys and seeds the
+# candidate exactly as the benchmark does (SYSTEM: the same images, manifest, readiness and
+# seed), runs ACCURACY_PHASES open-loop phases of the accuracy workload at a fixed, low rate
+# with every request and response captured, applies the faults between them, tears the
+# application down, and runs the oracle on the captured history. The exit status is the
+# verdict's: 0 PASS, 1 FAIL, 2 UNKNOWN (also when the run could not complete), with the
+# report, the failures' timelines and the history in $VIBESYS_ARTIFACTS_DIR/accuracy/.
+#
+# - The workload is Go: evaluator/internal/ttaccuracy, built as tt-accuracy. One request per
+#   operation, each with the info the oracle reads back: creates, updates, deletes and
+#   upserts, reads by key, lists, secondary-key queries and the trip joins, over the services'
+#   startup catalog, the seeded fixture and a few ids of the check's own per service.
+# - The oracle is Go: evaluator/cmd/oracle (tt-oracle) on the SDK's go/check, the model in
+#   evaluator/internal/ttoracle (README.md, "The accuracy check").
+
+ACCURACY_WORKLOAD = ms.Generator(["tt-accuracy"])  # on the task image's PATH
+ORACLE = ["tt-oracle"]  # on the task image's PATH
+
+# The load: fixed, so the history and the check's cost do not depend on the candidate's
+# speed, and low, so that responses are judged rather than capacity: at 40 operations per
+# second the base answers in milliseconds, loses none, and at most 2 operations are in flight
+# on one key, far below the checker's warning at 12 (README.md, "The accuracy check").
+ACCURACY_PHASES, ACCURACY_RATE, ACCURACY_SECS, ACCURACY_WARMUP = 4, 40, 60, 5
+
+# The faults: each service restarted once, at a quiescent point between phases. A restart
+# re-applies the service's startup catalog (an overwrite for routes and prices,
+# create-if-absent for the others), which the oracle models; anything else it must keep:
+# every acknowledged write survives. Routes and prices first (their catalog overwrites what
+# phase 0 changed), trips last (their joins read routes and trains).
+FAULTS = [
+    ms.Fault.restart("ts-route-service", after=0),
+    ms.Fault.restart("ts-price-service", after=0),
+    ms.Fault.restart("ts-station-service", after=1),
+    ms.Fault.restart("ts-config-service", after=1),
+    ms.Fault.restart("ts-train-service", after=2),
+    ms.Fault.restart("ts-travel-service", after=2),
+]
+
+ACCURACY = ms.Accuracy(
+    phases=ACCURACY_PHASES, rate=ACCURACY_RATE, secs=ACCURACY_SECS, warmup=ACCURACY_WARMUP,
+    arrivals="poisson", faults=FAULTS, oracle=ORACLE, workload=ACCURACY_WORKLOAD,
+)
+
+
 if __name__ == "__main__":
     ms.main(
         dataset=ds.generate,
@@ -168,4 +215,5 @@ if __name__ == "__main__":
         benchmark=benchmark,
         metrics=METRICS,
         validity=VALIDITY,
+        accuracy=ACCURACY,
     )
