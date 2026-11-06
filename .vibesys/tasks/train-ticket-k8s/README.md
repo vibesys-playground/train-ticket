@@ -10,7 +10,7 @@ correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives; the noise values are placeholders until a base is measured. |
-| `Dockerfile` | The task image: vibesys-evaluator (Python package, loadgen, otelcapture) installed from its public sources at `VIBESYS_COMMIT`, kubectl, buildctl, the task's Go programs, and the interim check's servicebench. |
+| `Dockerfile` | The task image: vibesys-evaluator (the Python package from PyPI, loadgen and otelcapture by `go install`) at the release `VIBESYS_EVALUATOR_VERSION` (v0.2.0-rc.1), kubectl, buildctl, the task's Go programs, and the interim check's servicebench. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules. |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
@@ -94,22 +94,29 @@ passed.
 Requests equal limits. The application: 6 services x (2 CPU, 1 GiB), 6 MongoDB x (1 CPU,
 1 GiB), the gateway (2 CPU, 256 MiB): 20 CPUs and about 12.3 GiB. Each phase pod adds the
 package's 6 CPUs and 4 GiB, the seed pod 4 CPUs and 2 GiB (not at the same time): about 26
-CPUs and 16.3 GiB at peak. One sample takes about 14 minutes (the images build in about a
-minute with warm caches).
+CPUs and 16.3 GiB at peak. One sample takes about 22 minutes (the images build in about a
+minute with warm caches): every phase pod receives the sample's whole write history, and the
+first warmup's 336 thousand writes (235 MB) make each later 40 s phase take about 3 minutes.
 
-## Measured (base, one sample)
+## Measured (base)
 
-On the shared kind cluster (one 32-CPU node), at commit 3ce8dbbf (first warmup 30 s), one
-sample: built in 56 s, seeded (224 entities, 448 requests) in 8 s, six phases, exit 0
-in 11.3 minutes, and every phase valid (0 errors, 0 failed checks, 36 to 67 thousand checks per
-phase). Closed loops: 3392, 4013, 5148 ops/s (median 4013); open loops at 2809 ops/s: p99 7.01,
-6.88, 7.25 ms (median 7.01). The closed loop was still warming up: within the trials the
-throughput climbed from 1300 to 5300 ops/s over 170 s of load while the route service ran at its
-2-CPU limit and its reads got faster (p50 94 ms to 20 ms); the other services used 1 to 1.5 CPUs and
-each MongoDB about 0.15. The first warmup is now 180 s, which this cluster run did not cover. In
-the closed loop route updates also wait for their route's exclusive key (32 routes, about 66 ms
-per update), which is what the closed loop's p99 (480 to 780 ms) shows; the open loop's p99 is
-the objective.
+On the shared kind cluster (one 32-CPU node, sharing the host with other jobs), every phase of
+both samples valid (0 errors, 0 failed checks), seeded (224 entities, 448 requests) in 8 s:
+
+| Sample | First warmup | Closed loops (ops/s) | Open loops (rate, p99 ms) | Result | Time |
+| --- | --- | --- | --- | --- | --- |
+| 3ce8dbbf | 30 s | 3392, 4013, 5148 | 2809: 7.01, 6.88, 7.25 | 4013.2 ops/s, 7.01 ms | 11 min |
+| bac5b6c5 | 180 s | 5348, 5547, 4811 | 3744: 7.07, 7.50, 6.76 | 5347.9 ops/s, 7.07 ms | 22 min |
+
+With a 30 s warmup the closed loop was still warming up: the throughput climbed from 1300 to
+5300 ops/s over 170 s of load while the route service ran at its 2-CPU limit and its reads got
+faster (p50 94 ms to 20 ms); the other services used 1 to 1.5 CPUs and each MongoDB about 0.15.
+After 180 s it no longer climbs within a window (5200 to 6200 ops/s in 5 s buckets of the
+second trial); the third trial's dip (3900 to 5700 ops/s, every service slower and the route
+service below its limit) came with a host load average of 85 on 64 CPUs from jobs outside the
+cluster. In the closed loop route updates also wait for their route's exclusive key (32 routes,
+about 66 ms per update), which is what the closed loop's p99 (230 to 780 ms) shows; the open
+loop's p99 is the objective.
 
 ## Running it
 
