@@ -1,3 +1,8 @@
+# The servicebench Train Ticket workload, for its accuracy mode only (check.py runs
+# `servicebench --mode accuracy` in the check's seed Job, inside the sample's namespace).
+# Every target is the task's gateway, which routes each service's /api/v1/<name>service
+# paths. The [load], [[operations]] and [objective] sections are servicebench's benchmark
+# mode's, which the task no longer uses; its accuracy mode parses and validates them.
 version = 1
 name = "train-ticket-stateful-randomized"
 application = "train-ticket"
@@ -19,37 +24,37 @@ records = 32
 [[targets]]
 name = "config"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[targets]]
 name = "station"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[targets]]
 name = "train"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[targets]]
 name = "travel"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[targets]]
 name = "route"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[targets]]
 name = "price"
 protocol = "http"
-address = "http://localhost:8080"
+address = "http://ts-gateway:8080"
 session_policy = "reuse"
 
 [[operations]]
