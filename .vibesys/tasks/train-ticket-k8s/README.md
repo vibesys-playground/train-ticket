@@ -11,7 +11,7 @@ the correctness bar are in [OBJECTIVE.md](OBJECTIVE.md).
 | --- | --- |
 | `vibesys.input.toml` | The task (schema `"0.2"`, no `[candidate]` server: the task deploys the application itself); `[environment] needs = ["kubernetes"]`. |
 | `objectives.toml` | The two objectives, each with the noise floor its base measure gave ("Measured (base)"). |
-| `Dockerfile` | The task image: vibesys-evaluator's microservices image at the release 0.3.0rc2, by tag and digest (the PyPI package with its bundled loadgen, otelcapture and core `vibesys-evaluator`, kubectl, buildctl), plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
+| `Dockerfile` | The task image: a digest-pinned `python:3.12.12-slim-bookworm` with the PyPI package `vibesys-evaluator==0.3.0rc2` (bundling loadgen, otelcapture and the core `vibesys-evaluator`), kubectl and buildctl, plus the task's Go programs: `tt-generator`, `tt-seed`, `tt-accuracy`, `tt-oracle`. |
 | `bench.py` | The benchmark (`python /task/bench.py benchmark --project-root ROOT --vs-output F`): the system (`k8s.App`), the seed, the workload (`Generator(["tt-generator"])`), `benchmark(run)` and the validity rules; and the accuracy check (`python /task/bench.py accuracy --project-root ROOT`): the evaluator's accuracy run of the same system with its own workload (`tt-accuracy`), the load, the fault schedule and the oracle (`tt-oracle`). |
 | `dataset.py` | The fixture's seed, size and digest (the fixture itself is generated in Go). |
 | `k8s/manifest.yaml` | The topology: six services (the candidate's image), six MongoDB 3.4, the nginx gateway. |
@@ -283,12 +283,6 @@ docker run --rm --network host --user "$(id -u):$(id -g)" \
   train-ticket-k8s-task python /task/bench.py benchmark --project-root "$PWD" \
   --vs-output /vibesys/artifacts/records.jsonl
 ```
-
-While vibesys-evaluator's images are private (until its release makes them public), the base
-image needs ghcr.io credentials twice: `docker login ghcr.io` for the `docker build`, and, for
-the in-cluster build of the task image, a docker config with the ghcr.io auth in the task
-container (`-v ghcr-config.json:/tmp/.docker/config.json:ro`: buildctl reads
-`$HOME/.docker/config.json`, and `HOME` is `/tmp`).
 
 The accuracy check is the same `docker run` with `python /task/bench.py accuracy
 --project-root "$PWD"`; `tt-oracle --history /tmp/tt-artifacts/accuracy/history` (in the task
