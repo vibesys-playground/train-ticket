@@ -4,17 +4,17 @@
 #
 # It holds vibesys-evaluator (the Python package from PyPI, with its bundled core, loadgen and
 # otelcapture, and PyYAML), kubectl and buildctl, and the task's Go programs, built from its
-# evaluator/ module, whose go.mod requires the Go SDK at the same release, v0.3.0-rc.2:
+# evaluator/ module, whose go.mod requires the Go SDK at the same release, v0.3.0-rc.3:
 # tt-generator (the benchmark's request generator), tt-seed (creates the fixture through the
 # public API in the seed Job), and the accuracy check's tt-accuracy (its request generator) and tt-oracle (its oracle, on go/check).
 
 # The one place the vibesys-evaluator release is pinned in this file: the PyPI version of the
-# package (0.3.0rc2; its platform wheel bundles the core, loadgen and otelcapture). evaluator/go.mod
-# requires the Go SDK at the same release, v0.3.0-rc.2 (tests/test_pins.py checks they agree).
+# package (0.3.0rc3; its platform wheel bundles the core, loadgen and otelcapture). evaluator/go.mod
+# requires the Go SDK at the same release, v0.3.0-rc.3 (tests/test_pins.py checks they agree).
 # The evaluator's own image (ghcr.io/uw-syfi/vibesys-evaluator-microservices) holds the same; it
 # is not the base here because it is private, and the in-cluster rebuild of this image pulls
 # without credentials.
-ARG VIBESYS_EVALUATOR_VERSION=0.3.0rc2
+ARG VIBESYS_EVALUATOR_VERSION=0.3.0rc3
 ARG KUBECTL_VERSION=v1.34.0
 ARG KUBECTL_SHA256=cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
 
